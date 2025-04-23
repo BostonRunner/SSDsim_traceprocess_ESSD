@@ -1,13 +1,11 @@
+import sys
+import os
 
-##################################################################################
-# Python script for processing blkparse output, including container ID tagging   #
-# Author: Ruofei Wu                                                              #
-# Updated: 2025-04-18 (with robust parsing fix)                                  #
-##################################################################################
+# 可选参数：结果目录，默认 ./results
+result_dir = sys.argv[1] if len(sys.argv) > 1 else "./results"
 
-# 打开输入输出文件
-origin_file = open("./results/result_path.txt", "r")
-final = open("./results/io.ascii", "w")
+origin_file = open(os.path.join(result_dir, "result_path.txt"), "r")
+final = open(os.path.join(result_dir, "io.ascii"), "w")
 cursor = 0
 
 print("Reading result_path.txt...")
