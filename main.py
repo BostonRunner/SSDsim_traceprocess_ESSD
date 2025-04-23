@@ -1,10 +1,12 @@
-
 import os
 import sys
 
+# 可选参数：结果目录，默认 ./results
+result_dir = sys.argv[1] if len(sys.argv) > 1 else "./results"
+
 # 路径定义
-input_file_path = "./results/result.txt"
-output_file_path = "./results/result_path.txt"
+input_file_path = os.path.join(result_dir, "result.txt")
+output_file_path = os.path.join(result_dir, "result_path.txt")
 device_path = "/dev/vdb"
 
 # 获取容器 UpperDir 和 LowerDir 信息
@@ -21,10 +23,11 @@ def get_overlay_paths(container_name):
             upper_dir = line.split('"')[-2]
     return upper_dir, lower_dirs
 
-# 收集 overlay 路径
+# 收集 overlay 路径（动态容器数量）
 upper_dirs = []
 lower_dirs = []
-for i in range(1, 7):
+max_containers = int(os.getenv("USE_CONTAINERS", 6))  # 默认6个容器
+for i in range(1, max_containers + 1):
     u, l = get_overlay_paths(f"docker_blktest{i}")
     upper_dirs.append(u)
     lower_dirs.append(l)
@@ -68,7 +71,7 @@ for i, line in enumerate(trace_lines):
 
         label = ""
         container_id = -1
-        for idx in range(6):
+        for idx in range(max_containers):
             if file_path.startswith(upper_dirs[idx]):
                 label = "[UpperLayer]"
                 container_id = idx + 1
@@ -92,3 +95,4 @@ with open(output_file_path, "w") as outfile:
     outfile.writelines(result_lines)
 
 print("\nProcessing complete! Result written to result_path.txt.")
+
