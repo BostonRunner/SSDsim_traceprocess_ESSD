@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# æ”¯æŒåŠ¨æ€è®¾å®šå®¹å™¨æ•°é‡ï¼ˆæœ€å¤§ä¸º6ï¼‰
+MAX_CONTAINERS=6
+USE_CONTAINERS=${USE_CONTAINERS:-$MAX_CONTAINERS}
+
 IMAGES=(
   "ubuntu:22.04"
   "opensuse/leap:15.5"
@@ -9,9 +13,10 @@ IMAGES=(
   "alpine:3.18"
   "archlinux:latest"
 )
+IMAGES=("${IMAGES[@]:0:$USE_CONTAINERS}")
+NUM_CONTAINERS=${#IMAGES[@]}
 
 CONTAINER_PREFIX="docker_blktest"
-NUM_CONTAINERS=${#IMAGES[@]}
 TEST_DIR="/mnt/testdir"
 BLOCK_SIZE="4K"
 FILE_SIZE="1M"
@@ -19,12 +24,19 @@ FILES_PER_ROUND=8
 TOTAL_SIZE=$((2 * 1024 * 1024 * 1024))  # 2GB
 TOTAL_FILES=$((TOTAL_SIZE / 1024 / 1024)) # 2048 files
 
-# ·Ö×é
-GROUP1=(1 2 3)
-GROUP2=(4 5 6)
+# åŠ¨æ€ç”Ÿæˆä¸¤ç»„å®¹å™¨ç¼–å·
+GROUP1=()
+GROUP2=()
+for i in $(seq 1 $NUM_CONTAINERS); do
+  if (( i % 2 == 1 )); then
+    GROUP1+=($i)
+  else
+    GROUP2+=($i)
+  fi
+done
 
-# ÇåÀí¾ÉÈÝÆ÷
-echo "[CLEANUP] ÇåÀí¾ÉÈÝÆ÷..."
+# æ¸…ç†æ—§å®¹å™¨
+echo "[CLEANUP] æ¸…ç†æ—§å®¹å™¨..."
 for i in $(seq 1 $NUM_CONTAINERS); do
   docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true &
 done
@@ -33,7 +45,7 @@ wait
 install_fio() {
   local container=$1
   local image=$2
-  echo "[INSTALL] °²×° fio µ½ $container ..."
+  echo "[INSTALL] å®‰è£… fio åˆ° $container ..."
   case "$image" in
     ubuntu*|debian*|parrotsec*) docker exec "$container" bash -c "apt-get update && apt-get install -y fio" ;;
     alpine*) docker exec "$container" sh -c "apk add --no-cache fio" ;;
@@ -46,34 +58,33 @@ prepare_container() {
   local idx=$1
   local image=${IMAGES[$idx]}
   local name="${CONTAINER_PREFIX}$((idx+1))"
-  echo "[INIT] Æô¶¯ $name ($image)..."
+  echo "[INIT] å¯åŠ¨ $name ($image)..."
   if docker run -dit --name "$name" "$image" bash >/dev/null 2>&1; then
-    echo "[INFO] $name Æô¶¯³É¹¦£¨bash£©"
+    echo "[INFO] $name å¯åŠ¨æˆåŠŸï¼ˆbashï¼‰"
   else
     docker rm -f "$name" >/dev/null 2>&1 || true
     docker run -dit --name "$name" "$image" sh >/dev/null
-    echo "[INFO] $name Æô¶¯³É¹¦£¨sh fallback£©"
+    echo "[INFO] $name å¯åŠ¨æˆåŠŸï¼ˆsh fallbackï¼‰"
   fi
 
   install_fio "$name" "$image"
 
-  echo "[PREP] $name ³õÊ¼»¯ $TOTAL_FILES ¸öÎÄ¼þ"
+  echo "[PREP] $name åˆå§‹åŒ– $TOTAL_FILES ä¸ªæ–‡ä»¶"
   docker exec "$name" mkdir -p "$TEST_DIR"
   for i in $(seq 1 $TOTAL_FILES); do
     docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=1M count=1 status=none || true
   done
 }
 
-echo "[STEP 1] ²¢·¢×¼±¸ÈÝÆ÷..."
+echo "[STEP 1] å¹¶å‘å‡†å¤‡å®¹å™¨..."
 for i in $(seq 0 $((NUM_CONTAINERS - 1))); do
   prepare_container "$i" &
 done
 wait
-echo "[STEP 1 DONE] ÈÝÆ÷×¼±¸Íê³É"
+echo "[STEP 1 DONE] å®¹å™¨å‡†å¤‡å®Œæˆ"
 sleep 30
 
-# ËùÓÐÈÝÆ÷×¼±¸Íê±ÏºóÍ³Ò»Ð´Èë
-echo "[STEP 2] ¿ªÊ¼²¢ÐÐÐ´Èë£¬Ã¿ÂÖÃ¿ÈÝÆ÷Ð´ $FILES_PER_ROUND ¸öÎÄ¼þ£¬¹² $TOTAL_FILES ¸öÎÄ¼þ/ÈÝÆ÷"
+echo "[STEP 2] å¼€å§‹å¹¶è¡Œå†™å…¥ï¼Œæ¯è½®æ¯å®¹å™¨å†™ $FILES_PER_ROUND ä¸ªæ–‡ä»¶ï¼Œå…± $TOTAL_FILES ä¸ªæ–‡ä»¶/å®¹å™¨"
 
 run_group_write() {
   local group=("$@")
@@ -85,7 +96,7 @@ run_group_write() {
         local container="${CONTAINER_PREFIX}${cid}"
         for j in $(seq 1 $FILES_PER_ROUND); do
           local file_idx=$((round * FILES_PER_ROUND + j))
-          echo "[C$cid][F$file_idx] ¿ªÊ¼Ð´Èë"
+          echo "[C$cid][F$file_idx] å¼€å§‹å†™å…¥"
           docker exec "$container" fio --name="c${cid}_f${file_idx}" \
             --filename=$TEST_DIR/file${file_idx}.dat \
             --rw=randwrite \
@@ -99,18 +110,17 @@ run_group_write() {
       ) &
     done
     wait
-    echo "Group ${group[*]} Round $((round + 1)) Íê³É"
+    echo "Group ${group[*]} Round $((round + 1)) å®Œæˆ"
   done
 }
 
-# ²¢ÐÐÖ´ÐÐÁ½¸öÈÝÆ÷×éÐ´Èë
 run_group_write "${GROUP1[@]}" &
 run_group_write "${GROUP2[@]}" &
 wait
 sleep 30
 
-echo "[STEP 3] Ð´ÈëÍê³É£¬ÕýÔÚÍ£Ö¹ÈÝÆ÷..."
+echo "[STEP 3] å†™å…¥å®Œæˆï¼Œæ­£åœ¨åœæ­¢å®¹å™¨..."
 for i in $(seq 1 $NUM_CONTAINERS); do
   docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
 done
-echo "[DONE] ÈÝÆ÷¹Ø±Õ£¬ÊµÑéÍê³É"
+echo "[DONE] å®¹å™¨å…³é—­ï¼Œå®žéªŒå®Œæˆ"
