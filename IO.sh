@@ -18,7 +18,7 @@ NUM_CONTAINERS=${#IMAGES[@]}
 
 CONTAINER_PREFIX="docker_blktest"
 TEST_DIR="/mnt/testdir"
-BLOCK_SIZE="4K"
+BLOCK_SIZE="8K"
 FILE_SIZE="1M"
 FILES_PER_ROUND=8
 TOTAL_SIZE=$((2 * 1024 * 1024 * 1024))  # 2GB
@@ -94,18 +94,27 @@ run_group_write() {
     for cid in "${group[@]}"; do
       (
         local container="${CONTAINER_PREFIX}${cid}"
+
+        # 打乱本轮要写的文件编号
+        file_indices=()
         for j in $(seq 1 $FILES_PER_ROUND); do
-          local file_idx=$((round * FILES_PER_ROUND + j))
-          echo "[C$cid][F$file_idx] 开始写入"
-          docker exec "$container" fio --name="c${cid}_f${file_idx}" \
-            --filename=$TEST_DIR/file${file_idx}.dat \
+          file_idx=$((round * FILES_PER_ROUND + j))
+          file_indices+=($file_idx)
+        done
+        file_indices=($(shuf -e "${file_indices[@]}"))
+
+        for idx in "${file_indices[@]}"; do
+          echo "[C$cid][F$idx] 开始覆盖写入"
+          docker exec "$container" fio --name="c${cid}_f${idx}" \
+            --filename=$TEST_DIR/file${idx}.dat \
             --rw=randwrite \
             --bs=$BLOCK_SIZE \
             --size=$FILE_SIZE \
             --ioengine=sync \
             --direct=1 \
             --numjobs=1 \
-            --runtime=2 --time_based
+            --runtime=2 --time_based \
+            --overwrite=1
         done
       ) &
     done
