@@ -18,10 +18,11 @@ NUM_CONTAINERS=${#IMAGES[@]}
 
 CONTAINER_PREFIX="docker_blktest"
 TEST_DIR="/mnt/testdir"
-BLOCK_SIZE="8K"
-FILE_SIZE="8K"
-TOTAL_FILES=1024
-FILES_PER_ROUND=64
+BLOCK_SIZE="8K"  # 写入粒度为8KB
+FILE_SIZE="1M"   # 每个文件大小1MB
+TOTAL_FILES=1024 # 总文件数
+FILES_PER_ROUND=64 # 每轮写入文件数
+TOTAL_SIZE=$((TOTAL_FILES * 1024)) # 总写入量为1GB
 
 # 动态生成两组容器编号
 GROUP1=()
@@ -71,7 +72,7 @@ prepare_container() {
   echo "[PREP] $name 初始化 $TOTAL_FILES 个文件"
   docker exec "$name" mkdir -p "$TEST_DIR"
   for i in $(seq 1 $TOTAL_FILES); do
-    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=8K count=1 status=none || true
+    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=1M count=1 status=none || true
   done
 }
 
