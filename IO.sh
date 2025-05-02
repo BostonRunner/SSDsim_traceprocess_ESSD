@@ -18,11 +18,10 @@ NUM_CONTAINERS=${#IMAGES[@]}
 
 CONTAINER_PREFIX="docker_blktest"
 TEST_DIR="/mnt/testdir"
-BLOCK_SIZE="4K"
-FILE_SIZE="1M"
-FILES_PER_ROUND=8
-TOTAL_SIZE=$((2 * 1024 * 1024 * 1024))  # 2GB
-TOTAL_FILES=$((TOTAL_SIZE / 1024 / 1024)) # 2048 files
+BLOCK_SIZE="8K"
+FILE_SIZE="8K"
+TOTAL_FILES=1024
+FILES_PER_ROUND=64
 
 # 动态生成两组容器编号
 GROUP1=()
@@ -72,7 +71,7 @@ prepare_container() {
   echo "[PREP] $name 初始化 $TOTAL_FILES 个文件"
   docker exec "$name" mkdir -p "$TEST_DIR"
   for i in $(seq 1 $TOTAL_FILES); do
-    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=1M count=1 status=none || true
+    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=8K count=1 status=none || true
   done
 }
 
@@ -95,7 +94,7 @@ run_group_write() {
       (
         local container="${CONTAINER_PREFIX}${cid}"
 
-        # 打乱本轮要写的文件编号
+        # 打乱这轮要写的文件编号
         file_indices=()
         for j in $(seq 1 $FILES_PER_ROUND); do
           file_idx=$((round * FILES_PER_ROUND + j))
@@ -114,7 +113,9 @@ run_group_write() {
             --direct=1 \
             --numjobs=1 \
             --runtime=2 --time_based \
-            --overwrite=1
+            --overwrite=1 \
+            --randrepeat=0 \
+            --random_generator=tausworthe
         done
       ) &
     done
