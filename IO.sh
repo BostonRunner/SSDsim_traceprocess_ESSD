@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# 最大容器数支持
 MAX_CONTAINERS=6
 USE_CONTAINERS=${USE_CONTAINERS:-$MAX_CONTAINERS}
 
@@ -18,14 +17,13 @@ NUM_CONTAINERS=${#IMAGES[@]}
 
 CONTAINER_PREFIX="docker_blktest"
 TEST_DIR="/mnt/testdir"
-BLOCK_SIZE="10K"       # 写入粒度为10KB，制造非对齐写入
-FILE_SIZE="1000K"      # 每个文件为1000KB
-TOTAL_FILES=1024       # 总共1024个文件
-FILES_PER_ROUND=64     # 每轮每容器写64个文件
+BLOCK_SIZE="10K"
+INIT_FILE_SIZE="1000K"
+TOTAL_FILES=1024
+FILES_PER_ROUND=64
 TOTAL_ROUNDS=$((TOTAL_FILES / FILES_PER_ROUND))
-TOTAL_PASSES=2         # 第一轮写入 + 第二轮覆盖写入
+TOTAL_PASSES=3  # 三轮写入，每轮后删除文件
 
-# 容器分两组交叉写入
 GROUP1=()
 GROUP2=()
 for i in $(seq 1 $NUM_CONTAINERS); do
@@ -68,12 +66,7 @@ prepare_container() {
   fi
 
   install_fio "$name" "$image"
-
-  echo "[PREP] $name 初始化 $TOTAL_FILES 个文件"
   docker exec "$name" mkdir -p "$TEST_DIR"
-  for i in $(seq 1 $TOTAL_FILES); do
-    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=1000K count=1 status=none || true
-  done
 }
 
 echo "[STEP 1] 并发准备容器..."
@@ -81,28 +74,40 @@ for i in $(seq 0 $((NUM_CONTAINERS - 1))); do
   prepare_container "$i" &
 done
 wait
-echo "[STEP 1 DONE] 所有容器已准备完毕"
-sleep 20
+echo "[STEP 1 DONE] 所有容器准备完成"
+sleep 15
+
+# 每轮前创建指定数量的文件
+init_files_for_container() {
+  local container=$1
+  echo "[CREATE] 初始化 $container 的 $TOTAL_FILES 个文件..."
+  for i in $(seq 1 $TOTAL_FILES); do
+    docker exec "$container" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=$INIT_FILE_SIZE count=1 status=none || true
+  done
+}
+
+delete_files_for_container() {
+  local container=$1
+  echo "[DELETE] 删除 $container 的全部测试文件..."
+  docker exec "$container" rm -f $TEST_DIR/file*.dat || true
+}
 
 run_group_write_pass() {
   local group=("$@")
-  for round in $(seq 0 $((TOTAL_ROUNDS - 1))); do
+  for round in $(seq 1 $TOTAL_ROUNDS); do
     for cid in "${group[@]}"; do
       (
         local container="${CONTAINER_PREFIX}${cid}"
-        file_indices=()
-        for j in $(seq 1 $FILES_PER_ROUND); do
-          file_idx=$((round * FILES_PER_ROUND + j))
-          file_indices+=($file_idx)
-        done
-        file_indices=($(shuf -e "${file_indices[@]}"))  # 打乱顺序
+        file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
         for idx in "${file_indices[@]}"; do
-          echo "[C$cid][F$idx] 覆盖写入中..."
+          local random_kb=$((800 + RANDOM % 401))  # 动态扰动：800~1200K
+          echo "[C$cid][F$idx] 写入大小 ${random_kb}K"
           docker exec "$container" fio --name="c${cid}_f${idx}" \
             --filename=$TEST_DIR/file${idx}.dat \
             --rw=randwrite \
             --bs=$BLOCK_SIZE \
-            --size=$FILE_SIZE \
+            --size="${random_kb}K" \
+            --offset_increment=10K \
             --ioengine=sync \
             --direct=1 \
             --numjobs=1 \
@@ -114,21 +119,36 @@ run_group_write_pass() {
       ) &
     done
     wait
-    echo "[Round $((round + 1))] 完成：Group ${group[*]}"
+    echo "[Round $round] 完成：Group ${group[*]}"
   done
 }
 
-echo "[STEP 2] 开始两轮随机覆盖写..."
 for pass in $(seq 1 $TOTAL_PASSES); do
-  echo "==== Pass $pass: 第 $pass 轮完整写入 ===="
+  echo "==== PASS $pass 开始 ===="
+  
+  # 重建所有容器文件
+  for cid in $(seq 1 $NUM_CONTAINERS); do
+    init_files_for_container "${CONTAINER_PREFIX}${cid}" &
+  done
+  wait
+  echo "[PASS $pass] 所有文件初始化完成 ✔"
+
   run_group_write_pass "${GROUP1[@]}" &
   run_group_write_pass "${GROUP2[@]}" &
   wait
-  echo "[PASS $pass DONE] ✔ 所有容器写入完成"
+  echo "[PASS $pass DONE] 所有容器写入完成 ✔"
+
+  # 删除所有容器文件
+  for cid in $(seq 1 $NUM_CONTAINERS); do
+    delete_files_for_container "${CONTAINER_PREFIX}${cid}" &
+  done
+  wait
+  echo "[PASS $pass] 文件清除完成 ✔"
+
 done
 
-echo "[STEP 3] 写入完成，停止容器..."
+echo "[STEP 3] 写入完成，正在关闭容器..."
 for i in $(seq 1 $NUM_CONTAINERS); do
   docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
 done
-echo "[DONE] 容器已关闭，实验完成"
+echo "[DONE] 实验完成 ✅"
