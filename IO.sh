@@ -88,9 +88,16 @@ init_files_for_container() {
 
 delete_files_for_container() {
   local container=$1
-  echo "[DELETE] 删除 $container 的全部测试文件..."
-  docker exec "$container" rm -f $TEST_DIR/file*.dat || true
+  echo "[DELETE] 清零+删除 $container 的测试文件..."
+  docker exec "$container" bash -c '
+    for f in '"$TEST_DIR"'/file*.dat; do
+      dd if=/dev/zero of="$f" bs=1M count=1 oflag=direct status=none || true
+    done
+    sync
+    rm -f '"$TEST_DIR"'/file*.dat || true
+  '
 }
+
 
 run_group_write_pass() {
   local group=("$@")
