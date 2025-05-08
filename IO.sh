@@ -22,7 +22,7 @@ INIT_FILE_SIZE="1000K"
 TOTAL_FILES=1024
 FILES_PER_ROUND=64
 TOTAL_ROUNDS=$((TOTAL_FILES / FILES_PER_ROUND))
-TOTAL_PASSES=3  # 三轮写入，每轮后删除文件
+TOTAL_PASSES=3  # 三轮写入
 
 GROUP1=()
 GROUP2=()
@@ -77,7 +77,6 @@ wait
 echo "[STEP 1 DONE] 所有容器准备完成"
 sleep 15
 
-# 每轮前创建指定数量的文件
 init_files_for_container() {
   local container=$1
   echo "[CREATE] 初始化 $container 的 $TOTAL_FILES 个文件..."
@@ -98,7 +97,6 @@ delete_files_for_container() {
   '
 }
 
-
 run_group_write_pass() {
   local group=("$@")
   for round in $(seq 1 $TOTAL_ROUNDS); do
@@ -107,7 +105,7 @@ run_group_write_pass() {
         local container="${CONTAINER_PREFIX}${cid}"
         file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
         for idx in "${file_indices[@]}"; do
-          local random_kb=$((800 + RANDOM % 401))  # 动态扰动：800~1200K
+          local random_kb=$((800 + RANDOM % 401))
           echo "[C$cid][F$idx] 写入大小 ${random_kb}K"
           docker exec "$container" fio --name="c${cid}_f${idx}" \
             --filename=$TEST_DIR/file${idx}.dat \
@@ -118,7 +116,7 @@ run_group_write_pass() {
             --ioengine=sync \
             --direct=1 \
             --numjobs=1 \
-            --runtime=2 --time_based \
+            --loops=3 \
             --overwrite=1 \
             --randrepeat=0 \
             --random_generator=tausworthe
@@ -132,8 +130,7 @@ run_group_write_pass() {
 
 for pass in $(seq 1 $TOTAL_PASSES); do
   echo "==== PASS $pass 开始 ===="
-  
-  # 重建所有容器文件
+
   for cid in $(seq 1 $NUM_CONTAINERS); do
     init_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
@@ -145,7 +142,6 @@ for pass in $(seq 1 $TOTAL_PASSES); do
   wait
   echo "[PASS $pass DONE] 所有容器写入完成 ✔"
 
-  # 删除所有容器文件
   for cid in $(seq 1 $NUM_CONTAINERS); do
     delete_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
