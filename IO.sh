@@ -20,7 +20,7 @@ TEST_DIR="/mnt/testdir"
 BLOCK_SIZE="10K"
 INIT_FILE_SIZE="1000K"
 TOTAL_FILES=1024
-FILES_PER_ROUND=64
+FILES_PER_ROUND=128
 TOTAL_ROUNDS=$((TOTAL_FILES / FILES_PER_ROUND))
 TOTAL_PASSES=3
 
@@ -56,6 +56,8 @@ prepare_container() {
   local idx=$1
   local image=${IMAGES[$idx]}
   local name="${CONTAINER_PREFIX}$((idx+1))"
+  echo "[PULL] 拉取镜像 $image"
+  docker pull "$image" >/dev/null
   echo "[INIT] 启动 $name ($image)..."
   if docker run -dit --name "$name" "$image" bash >/dev/null 2>&1; then
     echo "[INFO] $name 启动成功（bash）"
@@ -64,10 +66,20 @@ prepare_container() {
     docker run -dit --name "$name" "$image" sh >/dev/null
     echo "[INFO] $name 启动成功（sh fallback）"
   fi
-
+  until docker exec "$name" sh -c "echo ready" >/dev/null 2>&1; do
+    sleep 1
+  done
   install_fio "$name" "$image"
   docker exec "$name" mkdir -p "$TEST_DIR"
 }
+
+for i in $(seq 0 $((NUM_CONTAINERS - 1))); do
+  prepare_container "$i" &
+done
+wait
+
+echo "[PREP] 所有容器准备完成"
+sleep 15
 
 init_files_for_container() {
   local container=$1
@@ -96,9 +108,8 @@ run_group_write_pass() {
       (
         local container="${CONTAINER_PREFIX}${cid}"
         file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
-
         for idx in "${file_indices[@]}"; do
-          local random_kb=$((512 + RANDOM % 1537))
+          local random_kb=$((1024 + RANDOM % 2049))
           local rand_suffix=$((RANDOM % 100000))
           local file_name="file${idx}_r${rand_suffix}.dat"
           echo "[C$cid][$file_name] 写入大小 ${random_kb}K ..."
@@ -111,7 +122,7 @@ run_group_write_pass() {
             --ioengine=sync \
             --direct=1 \
             --numjobs=1 \
-            --loops=5 \
+            --loops=7 \
             --overwrite=1 \
             --randrepeat=0 \
             --random_generator=tausworthe
@@ -125,18 +136,15 @@ run_group_write_pass() {
 
 for pass in $(seq 1 $TOTAL_PASSES); do
   echo "==== PASS $pass 开始 ===="
-
   for cid in $(seq 1 $NUM_CONTAINERS); do
     init_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
   wait
   echo "[PASS $pass] 初始化完成"
-
   run_group_write_pass "${GROUP1[@]}" &
   run_group_write_pass "${GROUP2[@]}" &
   wait
   echo "[PASS $pass DONE] 写入完成"
-
   for cid in $(seq 1 $NUM_CONTAINERS); do
     delete_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
@@ -148,7 +156,6 @@ echo "[CLOSE] 关闭所有容器..."
 for i in $(seq 1 $NUM_CONTAINERS); do
   docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
   docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
-
 done
 
-echo "[DONE] 完全写入和GC压力测试完成!"
+echo "[DONE] 完全高压力写入测试完成!"
