@@ -22,7 +22,7 @@ INIT_FILE_SIZE="1000K"
 TOTAL_FILES=1024
 FILES_PER_ROUND=64
 TOTAL_ROUNDS=$((TOTAL_FILES / FILES_PER_ROUND))
-TOTAL_PASSES=3  # 三轮写入
+TOTAL_PASSES=3
 
 GROUP1=()
 GROUP2=()
@@ -69,14 +69,6 @@ prepare_container() {
   docker exec "$name" mkdir -p "$TEST_DIR"
 }
 
-echo "[STEP 1] 并发准备容器..."
-for i in $(seq 0 $((NUM_CONTAINERS - 1))); do
-  prepare_container "$i" &
-done
-wait
-echo "[STEP 1 DONE] 所有容器准备完成"
-sleep 15
-
 init_files_for_container() {
   local container=$1
   echo "[CREATE] 初始化 $container 的 $TOTAL_FILES 个文件..."
@@ -104,11 +96,14 @@ run_group_write_pass() {
       (
         local container="${CONTAINER_PREFIX}${cid}"
         file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
+
         for idx in "${file_indices[@]}"; do
-          local random_kb=$((800 + RANDOM % 401))
-          echo "[C$cid][F$idx] 写入大小 ${random_kb}K"
-          docker exec "$container" fio --name="c${cid}_f${idx}" \
-            --filename=$TEST_DIR/file${idx}.dat \
+          local random_kb=$((512 + RANDOM % 1537))
+          local rand_suffix=$((RANDOM % 100000))
+          local file_name="file${idx}_r${rand_suffix}.dat"
+          echo "[C$cid][$file_name] 写入大小 ${random_kb}K ..."
+          docker exec "$container" fio --name="c${cid}_${file_name}" \
+            --filename=$TEST_DIR/$file_name \
             --rw=randwrite \
             --bs=$BLOCK_SIZE \
             --size="${random_kb}K" \
@@ -116,7 +111,7 @@ run_group_write_pass() {
             --ioengine=sync \
             --direct=1 \
             --numjobs=1 \
-            --loops=3 \
+            --loops=5 \
             --overwrite=1 \
             --randrepeat=0 \
             --random_generator=tausworthe
@@ -124,7 +119,7 @@ run_group_write_pass() {
       ) &
     done
     wait
-    echo "[Round $round] 完成：Group ${group[*]}"
+    echo "[Round $round] 完成: Group ${group[*]}"
   done
 }
 
@@ -135,23 +130,25 @@ for pass in $(seq 1 $TOTAL_PASSES); do
     init_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
   wait
-  echo "[PASS $pass] 所有文件初始化完成 ✔"
+  echo "[PASS $pass] 初始化完成"
 
   run_group_write_pass "${GROUP1[@]}" &
   run_group_write_pass "${GROUP2[@]}" &
   wait
-  echo "[PASS $pass DONE] 所有容器写入完成 ✔"
+  echo "[PASS $pass DONE] 写入完成"
 
   for cid in $(seq 1 $NUM_CONTAINERS); do
     delete_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
   wait
-  echo "[PASS $pass] 文件清除完成 ✔"
-
+  echo "[PASS $pass] 删除完成"
 done
 
-echo "[STEP 3] 写入完成，正在关闭容器..."
+echo "[CLOSE] 关闭所有容器..."
 for i in $(seq 1 $NUM_CONTAINERS); do
   docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
+  docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
+
 done
-echo "[DONE] 实验完成 ✅"
+
+echo "[DONE] 完全写入和GC压力测试完成!"
