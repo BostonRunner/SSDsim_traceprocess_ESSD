@@ -117,7 +117,7 @@ run_group_write_round() {
           --ioengine=sync \
           --direct=1 \
           --numjobs=1 \
-          --time_based --runtime=5 \
+          --time_based --runtime=1 \
           --overwrite=1 \
           --randrepeat=0 \
           --random_generator=tausworthe
