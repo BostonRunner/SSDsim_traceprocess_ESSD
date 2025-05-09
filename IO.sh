@@ -20,8 +20,8 @@ TEST_DIR="/mnt/testdir"
 BLOCK_SIZE="10K"
 INIT_FILE_SIZE="1000K"
 TOTAL_FILES=1024
-FILES_PER_ROUND=128
-TOTAL_ROUNDS=$((TOTAL_FILES / FILES_PER_ROUND))
+FILES_PER_ROUND=64
+ROUNDS_PER_PASS=$((TOTAL_FILES / FILES_PER_ROUND))
 TOTAL_PASSES=3
 
 GROUP1=()
@@ -79,19 +79,11 @@ done
 wait
 
 echo "[PREP] 所有容器准备完成"
-sleep 15
-
-init_files_for_container() {
-  local container=$1
-  echo "[CREATE] 初始化 $container 的 $TOTAL_FILES 个文件..."
-  for i in $(seq 1 $TOTAL_FILES); do
-    docker exec "$container" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=$INIT_FILE_SIZE count=1 status=none || true
-  done
-}
+sleep 10
 
 delete_files_for_container() {
   local container=$1
-  echo "[DELETE] 清零+删除 $container 的测试文件..."
+  echo "[DELETE] 清除 $container 中文件..."
   docker exec "$container" bash -c '
     for f in '"$TEST_DIR"'/file*.dat; do
       dd if=/dev/zero of="$f" bs=1M count=1 oflag=direct status=none || true
@@ -101,55 +93,57 @@ delete_files_for_container() {
   '
 }
 
-run_group_write_pass() {
+run_group_write_round() {
   local group=("$@")
-  for round in $(seq 1 $TOTAL_ROUNDS); do
-    for cid in "${group[@]}"; do
-      (
-        local container="${CONTAINER_PREFIX}${cid}"
-        file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
-        for idx in "${file_indices[@]}"; do
-          local random_kb=$((1024 + RANDOM % 2049))
-          local rand_suffix=$((RANDOM % 100000))
-          local file_name="file${idx}_r${rand_suffix}.dat"
-          echo "[C$cid][$file_name] 写入大小 ${random_kb}K ..."
-          docker exec "$container" fio --name="c${cid}_${file_name}" \
-            --filename=$TEST_DIR/$file_name \
-            --rw=randwrite \
-            --bs=$BLOCK_SIZE \
-            --size="${random_kb}K" \
-            --offset_increment=10K \
-            --ioengine=sync \
-            --direct=1 \
-            --numjobs=1 \
-            --loops=7 \
-            --overwrite=1 \
-            --randrepeat=0 \
-            --random_generator=tausworthe
-        done
-      ) &
-    done
-    wait
-    echo "[Round $round] 完成: Group ${group[*]}"
+  local round_id=$1
+  local pass_id=$2
+
+  for cid in "${group[@]}"; do
+    (
+      local container="${CONTAINER_PREFIX}${cid}"
+      file_indices=($(shuf -i 1-$TOTAL_FILES -n $FILES_PER_ROUND))
+
+      for idx in "${file_indices[@]}"; do
+        local random_kb=$((1024 + RANDOM % 2049))
+        local rand_suffix=$((RANDOM % 100000))
+        local file_name="file${idx}_r${rand_suffix}.dat"
+        echo "[PASS $pass_id][ROUND $round_id][C$cid] $file_name: ${random_kb}K"
+        docker exec "$container" fio --name="c${cid}_${file_name}" \
+          --filename=$TEST_DIR/$file_name \
+          --rw=randwrite \
+          --bs=$BLOCK_SIZE \
+          --size="${random_kb}K" \
+          --offset_increment=10K \
+          --ioengine=sync \
+          --direct=1 \
+          --numjobs=1 \
+          --time_based --runtime=5 \
+          --overwrite=1 \
+          --randrepeat=0 \
+          --random_generator=tausworthe
+      done
+    ) &
   done
+  wait
 }
 
 for pass in $(seq 1 $TOTAL_PASSES); do
-  echo "==== PASS $pass 开始 ===="
-  for cid in $(seq 1 $NUM_CONTAINERS); do
-    init_files_for_container "${CONTAINER_PREFIX}${cid}" &
+  echo "==== 大轮 $pass 开始 ===="
+
+  for round in $(seq 1 $ROUNDS_PER_PASS); do
+    echo "---- 小轮 $round 开始 ----"
+    run_group_write_round "$round" "$pass" "${GROUP1[@]}" &
+    run_group_write_round "$round" "$pass" "${GROUP2[@]}" &
+    wait
+    echo "---- 小轮 $round 完成 ----"
   done
-  wait
-  echo "[PASS $pass] 初始化完成"
-  run_group_write_pass "${GROUP1[@]}" &
-  run_group_write_pass "${GROUP2[@]}" &
-  wait
-  echo "[PASS $pass DONE] 写入完成"
+
+  echo "==== 大轮 $pass 文件删除 ===="
   for cid in $(seq 1 $NUM_CONTAINERS); do
     delete_files_for_container "${CONTAINER_PREFIX}${cid}" &
   done
   wait
-  echo "[PASS $pass] 删除完成"
+  echo "==== 大轮 $pass 完成 ===="
 done
 
 echo "[CLOSE] 关闭所有容器..."
@@ -158,4 +152,4 @@ for i in $(seq 1 $NUM_CONTAINERS); do
   docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
 done
 
-echo "[DONE] 完全高压力写入测试完成!"
+echo "[DONE] 完全多轮重写高压力测试完成!"
