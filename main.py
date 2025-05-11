@@ -7,7 +7,7 @@ result_dir = sys.argv[1] if len(sys.argv) > 1 else "./results"
 # 路径定义
 input_file_path = os.path.join(result_dir, "result.txt")
 output_file_path = os.path.join(result_dir, "result_path.txt")
-device_path = "/dev/vdb"
+device_path = "/dev/nvme1n1"
 
 # 获取容器 UpperDir 和 LowerDir 信息
 def get_overlay_paths(container_name):
@@ -33,66 +33,79 @@ for i in range(1, max_containers + 1):
     lower_dirs.append(l)
 
 # 读取 trace 日志
+# 初始化结果文件
+with open(output_file_path, "w") as f:
+    pass  # 清空旧文件内容或创建新文件
+
 with open(input_file_path, "r") as infile:
     trace_lines = infile.readlines()
 
 result_lines = []
+batch_size = 90000  # 每15分钟写一次
 
-# 处理每一行 trace
-for i, line in enumerate(trace_lines):
-    try:
-        parts = line.strip().split()
-        if len(parts) < 10:
+with open(output_file_path, "a") as outfile:  # 追加写
+    for i, line in enumerate(trace_lines):
+        try:
+            parts = line.strip().split()
+            if len(parts) < 10:
+                continue
+            sector_idx = parts.index('+') - 1 if '+' in parts else -1
+            if sector_idx == -1 or not parts[sector_idx].isdigit():
+                continue
+
+            block = int(int(parts[sector_idx]) / 8)
+
+            icheck_cmd = f"debugfs -R 'icheck {block}' {device_path}"
+            icheck_result = os.popen(icheck_cmd).readlines()
+            if not icheck_result:
+                continue
+            inode_line = icheck_result[-1]
+            inode_parts = inode_line.strip().split()
+            if not inode_parts or not inode_parts[-1].isdigit():
+                continue
+            inode = int(inode_parts[-1])
+            if inode == 8:
+                continue
+
+            ncheck_cmd = f"debugfs -R 'ncheck {inode}' {device_path}"
+            ncheck_result = os.popen(ncheck_cmd).readlines()
+            if not ncheck_result:
+                continue
+            path_line = ncheck_result[-1].strip()
+            file_path = "/mnt/docker_tmp" + path_line.split()[-1]
+
+            label = ""
+            container_id = -1
+            for idx in range(max_containers):
+                if file_path.startswith(upper_dirs[idx]):
+                    label = "[UpperLayer]"
+                    container_id = idx + 1
+                    break
+                elif any(ld in file_path for ld in lower_dirs[idx]):
+                    label = "[LowerLayer]"
+                    container_id = idx + 1
+                    break
+
+            if label and container_id != -1:
+                result_lines.append(f"{line.strip()}\t{file_path}\t{label}\t[Container{container_id}]\n")
+
+        except Exception as e:
+            print(f"\nError at line {i}: {e}")
             continue
-        sector_idx = parts.index('+') - 1 if '+' in parts else -1
-        if sector_idx == -1 or not parts[sector_idx].isdigit():
-            continue
 
-        block = int(int(parts[sector_idx]) / 8)
+        if (i + 1) % batch_size == 0:
+            outfile.writelines(result_lines)
+            outfile.flush()
+            os.fsync(outfile.fileno())
+            result_lines.clear()
 
-        icheck_cmd = f"debugfs -R 'icheck {block}' {device_path}"
-        icheck_result = os.popen(icheck_cmd).readlines()
-        if not icheck_result:
-            continue
-        inode_line = icheck_result[-1]
-        inode_parts = inode_line.strip().split()
-        if not inode_parts or not inode_parts[-1].isdigit():
-            continue
-        inode = int(inode_parts[-1])
-        if inode == 8:
-            continue
+        sys.stdout.write(f"\rProcessing: {i+1}/{len(trace_lines)} ({(i+1)/len(trace_lines)*100:.2f}%)")
+        sys.stdout.flush()
 
-        ncheck_cmd = f"debugfs -R 'ncheck {inode}' {device_path}"
-        ncheck_result = os.popen(ncheck_cmd).readlines()
-        if not ncheck_result:
-            continue
-        path_line = ncheck_result[-1].strip()
-        file_path = "/mnt/docker_tmp" + path_line.split()[-1]
+    # 最后一批写入
+    if result_lines:
+        outfile.writelines(result_lines)
+        outfile.flush()
+        os.fsync(outfile.fileno())
 
-        label = ""
-        container_id = -1
-        for idx in range(max_containers):
-            if file_path.startswith(upper_dirs[idx]):
-                label = "[UpperLayer]"
-                container_id = idx + 1
-                break
-            elif any(ld in file_path for ld in lower_dirs[idx]):
-                label = "[LowerLayer]"
-                container_id = idx + 1
-                break
-
-        if label and container_id != -1:
-            result_lines.append(f"{line.strip()}\t{file_path}\t{label}\t[Container{container_id}]\n")
-
-    except Exception as e:
-        print(f"\nError at line {i}: {e}")
-        continue
-
-    sys.stdout.write(f"\rProcessing: {i+1}/{len(trace_lines)} ({(i+1)/len(trace_lines)*100:.2f}%)")
-    sys.stdout.flush()
-
-with open(output_file_path, "w") as outfile:
-    outfile.writelines(result_lines)
-
-print("\nProcessing complete! Result written to result_path.txt.")
-
+print("\nProcessing complete! Incremental results written to result_path.txt.")
