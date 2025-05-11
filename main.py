@@ -7,7 +7,7 @@ result_dir = sys.argv[1] if len(sys.argv) > 1 else "./results"
 # 路径定义
 input_file_path = os.path.join(result_dir, "result.txt")
 output_file_path = os.path.join(result_dir, "result_path.txt")
-device_path = "/dev/nvme1n1"
+device_path = "/dev/vdb"
 
 # 获取容器 UpperDir 和 LowerDir 信息
 def get_overlay_paths(container_name):
