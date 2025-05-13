@@ -23,7 +23,7 @@ sleep 3
 
 cd "$RESULT_DIR" || exit
 # grep 'A' result.log | grep " W " > result_temp.txt
-grep -E " W | WS " result.log > result_temp.txt
+grep -E " W | WS " result.log | grep " D " > result_temp.txt
 sort -n -k 4 result_temp.txt > result.txt
 cd ..
 
