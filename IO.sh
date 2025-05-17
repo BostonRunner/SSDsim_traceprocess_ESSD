@@ -103,18 +103,22 @@ run_group_write() {
           local rand_kb=$((1800 + RANDOM % 401))
           echo "[Pass $round_idx][C$cid][F$file_idx] ${rand_kb}KB"
 
-          docker exec "$container" fio --name="c${cid}_f${file_idx}" \
-            --filename=$TEST_DIR/file${file_idx}.dat \
-            --rw=randwrite \
-            --bs=$BLOCK_SIZE \
-            --size="${rand_kb}K" \
-            --overwrite=1 \
-            --ioengine=sync \
-            --direct=1 \
-            --numjobs=1 \
-            --runtime=3 --time_based \
-            --randrepeat=0 \
-            --random_generator=tausworthe
+        docker exec "$container" fio --name="c${cid}_f${idx}" \
+          --filename=$TEST_DIR/file${idx}.dat \
+          --rw=randwrite \
+          --bs=$BLOCK_SIZE \
+          --size="${rand_kb}K" \
+          --offset=0 \
+          --offset_increment=10K \
+          --random_distribution=zipf \
+          --overwrite=1 \
+          --ioengine=sync \
+          --direct=1 \
+          --numjobs=1 \
+          --runtime=3 --time_based \
+          --randrepeat=0 \
+          --random_generator=tausworthe
+
         done
       ) &
     done
