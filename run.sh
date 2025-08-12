@@ -6,10 +6,10 @@ rm -rf "$RESULT_DIR/"
 mkdir "$RESULT_DIR"
 cd "$RESULT_DIR" || exit
 echo "directory created"
-touch result.txt
-touch result.log
-echo "result.txt result.log created"
-echo "blktrace activating"
+# touch result.txt
+# touch result.log
+# echo "result.txt result.log created"
+# echo "blktrace activating"
 cd ..
 
 docker kill $(docker ps -q)
