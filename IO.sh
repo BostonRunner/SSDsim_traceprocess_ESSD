@@ -1,164 +1,187 @@
 #!/bin/bash
-set -e
+# 6 containers with fixed names; each runs a distinct workload.
+# Designed to avoid the "no such container" issue and ensure fio writes actually happen.
+# Default data mode writes to the container layer (overlay), which does NOT support O_DIRECT.
+# For real-device/O_DIRECT tests, set DATA_MODE=bind to bind-mount a host dir at /data.
+set -euo pipefail
 
-MAX_CONTAINERS=6
-USE_CONTAINERS=${USE_CONTAINERS:-$MAX_CONTAINERS}
+RESULT_ROOT="${RESULT_ROOT:-./results_all}"
+RUN_TAG="${RUN_TAG:-result6}"
+OUT_DIR="${RESULT_ROOT}/${RUN_TAG}"
+IMAGE="${IMAGE:-ubuntu:22.04}"
 
-IMAGES=(
-  "ubuntu:22.04"
-  "opensuse/leap:15.5"
-  "parrotsec/security"
-  "debian:11"
-  "alpine:3.18"
-  "archlinux:latest"
-)
-IMAGES=("${IMAGES[@]:0:$USE_CONTAINERS}")
-NUM_CONTAINERS=${#IMAGES[@]}
+# Data placement mode: overlay | bind
+DATA_MODE="${DATA_MODE:-overlay}"
 
+# Paths inside container depending on mode
+if [ "$DATA_MODE" = "bind" ]; then
+  TEST_FILE="/data/testfile.dat"
+  IOENGINE_SEQ="${IOENGINE_SEQ:-libaio}"
+  IOENGINE_RAND="${IOENGINE_RAND:-libaio}"
+  DIRECT="${DIRECT:-1}"
+else
+  TEST_FILE="/mnt/testfile.dat"
+  IOENGINE_SEQ="${IOENGINE_SEQ:-sync}"
+  IOENGINE_RAND="${IOENGINE_RAND:-sync}"
+  DIRECT="${DIRECT:-0}"
+fi
+
+RUNTIME="${RUNTIME:-30}"
+FILE_SIZE="${FILE_SIZE:-1G}"
+BS_SEQ="${BS_SEQ:-128k}"
+BS_RAND="${BS_RAND:-16k}"
+IODEPTH_SEQ="${IODEPTH_SEQ:-1}"
+IODEPTH_RAND="${IODEPTH_RAND:-16}"
 CONTAINER_PREFIX="docker_blktest"
-TEST_DIR="/mnt/testdir"
-BLOCK_SIZE="10K"
-FILES_PER_ROUND=8
-TOTAL_SIZE=$((2 * 1024 * 1024 * 1024))  # 2GB
-TOTAL_FILES=1024
-TOTAL_PASSES=2  # 两大轮
-
 WORKLOADS=(seqrw seqwrite randwrite hotrw hotwrite randrw)
 
-echo "[CLEANUP] 清理旧容器..."
-for i in $(seq 1 $NUM_CONTAINERS); do
+mkdir -p "${OUT_DIR}"
+for i in $(seq 1 6); do
+  mkdir -p "${OUT_DIR}/c${i}"
+  # for bind mode, also create a data dir to mount
+  if [ "$DATA_MODE" = "bind" ]; then
+    mkdir -p "${OUT_DIR}/c${i}/data"
+  fi
+done
+
+# Mapping file (host)
+printf '{' > "${OUT_DIR}/workloads.json"
+for i in $(seq 1 6); do
+  wl="${WORKLOADS[$((i-1))]}"
+  printf '"c%d":"%s"' "$i" "$wl" >> "${OUT_DIR}/workloads.json"
+  if [ $i -lt 6 ]; then printf ',' >> "${OUT_DIR}/workloads.json"; fi
+done
+printf '}\n' >> "${OUT_DIR}/workloads.json"
+
+echo "[CLEANUP] Removing old containers if present..."
+for i in $(seq 1 6); do
   docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true &
 done
 wait
 
+launch_container() {
+  local idx=$1
+  local name="${CONTAINER_PREFIX}${idx}"
+  local mount_out="$(realpath "${OUT_DIR}/c${idx}")"
+  if [ "$DATA_MODE" = "bind" ]; then
+    local mount_data="$(realpath "${OUT_DIR}/c${idx}/data")"
+    echo "[INIT] Launch ${name} (out->/out, data->/data)"
+    if docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${mount_data}:/data" "${IMAGE}" bash >/dev/null 2>&1; then :; else
+      docker rm -f "${name}" >/dev/null 2>&1 || true
+      docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${mount_data}:/data" "${IMAGE}" sh >/dev/null
+    fi
+  else
+    echo "[INIT] Launch ${name} (out->/out, using container layer for TEST_FILE)"
+    if docker run -dit --name "${name}" -v "${mount_out}:/out" "${IMAGE}" bash >/dev/null 2>&1; then :; else
+      docker rm -f "${name}" >/dev/null 2>&1 || true
+      docker run -dit --name "${name}" -v "${mount_out}:/out" "${IMAGE}" sh >/dev/null
+    fi
+  fi
+}
+
+for i in $(seq 1 6); do launch_container "$i" & done
+wait
+echo "[STEP] Containers up: ${CONTAINER_PREFIX}1..6 (mode=${DATA_MODE})"
+
 install_fio() {
-  local container=$1
-  local image=$2
-  echo "[INSTALL] 安装 fio 到 $container ..."
-  case "$image" in
-    ubuntu*|debian*|parrotsec*) docker exec "$container" bash -c "apt-get update && apt-get install -y fio" ;;
-    alpine*) docker exec "$container" sh -c "apk add --no-cache fio" ;;
-    archlinux*) docker exec "$container" bash -c "pacman -Sy --noconfirm fio" ;;
-    opensuse*) docker exec "$container" bash -c "zypper --non-interactive install fio" ;;
+  local name="$1"
+  echo "[INSTALL] fio in ${name}"
+  docker exec "${name}" bash -lc "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fio > /dev/null" || \
+  docker exec "${name}" sh -lc "apk add --no-cache fio || ( zypper --non-interactive install fio || pacman -Sy --noconfirm fio ) || true"
+}
+
+prepare_file() {
+  local name="$1"
+  if [ "$DATA_MODE" = "bind" ]; then
+    docker exec "${name}" sh -lc "fallocate -l ${FILE_SIZE} ${TEST_FILE} 2>/dev/null || dd if=/dev/zero of=${TEST_FILE} bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none"
+  else
+    docker exec "${name}" sh -lc "mkdir -p /mnt && (fallocate -l ${FILE_SIZE} ${TEST_FILE} 2>/dev/null || dd if=/dev/zero of=${TEST_FILE} bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none)"
+  fi
+  # Verify file
+  docker exec "${name}" sh -lc "ls -lh ${TEST_FILE} && stat -c '%s' ${TEST_FILE} || true" | tee -a "${OUT_DIR}/$(basename ${name})_prep.log"
+}
+
+for i in $(seq 1 6); do
+  cname="${CONTAINER_PREFIX}${i}"
+  install_fio "${cname}" &
+done
+wait
+for i in $(seq 1 6); do
+  cname="${CONTAINER_PREFIX}${i}"
+  echo "[PREP] ${cname}: create test file ${TEST_FILE} (${FILE_SIZE})"
+  prepare_file "${cname}" &
+done
+wait
+echo "[STEP] Test files prepared"
+
+fio_cmd() {
+  local wl="$1"
+  case "$wl" in
+    seqrw)
+      echo "fio --name=seqrw --filename=${TEST_FILE} --rw=readwrite --rwmixread=50 --bs=${BS_SEQ} --ioengine=${IOENGINE_SEQ} --iodepth=${IODEPTH_SEQ} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
+    seqwrite)
+      echo "fio --name=seqwrite --filename=${TEST_FILE} --rw=write --bs=${BS_SEQ} --ioengine=${IOENGINE_SEQ} --iodepth=${IODEPTH_SEQ} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
+    randwrite)
+      echo "fio --name=randwrite --filename=${TEST_FILE} --rw=randwrite --bs=${BS_RAND} --ioengine=${IOENGINE_RAND} --iodepth=${IODEPTH_RAND} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
+    hotrw)
+      echo "fio --name=hotrw --filename=${TEST_FILE} --rw=randrw --rwmixread=70 --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=${IOENGINE_RAND} --iodepth=${IODEPTH_RAND} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
+    hotwrite)
+      echo "fio --name=hotwrite --filename=${TEST_FILE} --rw=randwrite --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=${IOENGINE_RAND} --iodepth=${IODEPTH_RAND} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
+    randrw)
+      echo "fio --name=randrw --filename=${TEST_FILE} --rw=randrw --rwmixread=50 --bs=${BS_RAND} --ioengine=${IOENGINE_RAND} --iodepth=${IODEPTH_RAND} --direct=${DIRECT} --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      ;;
   esac
 }
 
-prepare_container() {
-  local idx=$1
-  local image=${IMAGES[$idx]}
-  local name="${CONTAINER_PREFIX}$((idx+1))"
-  echo "[INIT] 启动 $name ($image)..."
-  if docker run -dit --name "$name" "$image" bash >/dev/null 2>&1; then
-    echo "[INFO] $name 启动成功（bash）"
-  else
-    docker rm -f "$name" >/dev/null 2>&1 || true
-    docker run -dit --name "$name" "$image" sh >/dev/null
-    echo "[INFO] $name 启动成功（sh fallback）"
+echo "[STEP] Launching 6 fio jobs (concurrent)..."
+pids=()
+for i in $(seq 1 6); do
+  wl="${WORKLOADS[$((i-1))]}"
+  name="${CONTAINER_PREFIX}${i}"
+  out_json="${OUT_DIR}/c${i}/fio_c${i}_${wl}.json"
+  out_log="${OUT_DIR}/c${i}/fio_c${i}_${wl}.log"
+  cmd="$(fio_cmd "${wl}") --output=/out/$(basename "${out_json}")"
+  echo "[RUN] ${name} -> ${wl} | ${cmd}" | tee -a "${out_log}"
+  # Run and capture output (stdout/stderr) to log on host
+  ( docker exec "${name}" sh -lc "${cmd}" ) > "${out_log}" 2>&1 &
+  pids+=($!)
+done
+
+fail=0
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    echo "[ERROR] One fio job failed"
+    fail=1
   fi
-
-  install_fio "$name" "$image"
-  docker exec "$name" mkdir -p "$TEST_DIR"
-
-  echo "[PREP] $name 初始化 $TOTAL_FILES 个文件"
-  for i in $(seq 1 $TOTAL_FILES); do
-    docker exec "$name" dd if=/dev/zero of=$TEST_DIR/file${i}.dat bs=1M count=1 status=none || true
-  done
-}
-
-echo "[STEP 1] 准备容器..."
-for i in $(seq 0 $((NUM_CONTAINERS - 1))); do
-  prepare_container "$i" &
 done
+echo "[STEP] Fio jobs finished (fail=${fail})"
+
+# Verify JSON outputs exist and non-empty
+echo "[VERIFY] Checking JSON outputs..."
+missing=0
+for i in $(seq 1 6); do
+  wl="${WORKLOADS[$((i-1))]}"
+  f="${OUT_DIR}/c${i}/fio_c${i}_${wl}.json"
+  if [ ! -s "$f" ]; then
+    echo "[WARN] Missing or empty: $f"
+    echo "----- fio log (last 50 lines) c${i}/${wl} -----"
+    tail -n 50 "${OUT_DIR}/c${i}/fio_c${i}_${wl}.log" || true
+    echo "----------------------------------------------"
+    missing=$((missing+1))
+  fi
+done
+
+echo "[STOP] Stopping containers..."
+for i in $(seq 1 6); do docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true & done
 wait
-echo "[STEP 1 DONE] 完成"
-sleep 10
 
-run_group_write() {
-  local group=("$@")
-  local round_idx=$1
-  shift
-  local containers=("$@")
-
-  local shuffled=($(shuf -i 1-$TOTAL_FILES))
-
-  local rounds=$((TOTAL_FILES / FILES_PER_ROUND))
-
-  for round in $(seq 0 $((rounds - 1))); do
-    echo 3 > /proc/sys/vm/drop_caches
-
-    for cid in "${containers[@]}"; do
-      (
-        local container="${CONTAINER_PREFIX}${cid}"
-
-        for j in $(seq 1 $FILES_PER_ROUND); do
-          local file_idx=${shuffled[$((round * FILES_PER_ROUND + j - 1))]}
-          local rand_kb=$((1800 + RANDOM % 401))
-          echo "[Pass $round_idx][C$cid][F$file_idx] ${rand_kb}KB"
-
-          # Log fio command and execute it
-          case "${WORKLOADS[$((cid - 1))]}" in
-            seqrw)
-              echo "[DEBUG] Running fio for seqrw: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=readwrite --rwmixread=50 --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
-                --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
-                --randrepeat=0 --random_generator=tausworthe --output-format=json
-              ;;
-            seqwrite)
-              echo "[DEBUG] Running fio for seqwrite: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=write --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
-                --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
-                --randrepeat=0 --random_generator=tausworthe --output-format=json
-              ;;
-            randwrite)
-              echo "[DEBUG] Running fio for randwrite: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=randwrite --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
-                --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
-                --randrepeat=0 --random_generator=tausworthe --output-format=json
-              ;;
-            hotrw)
-              echo "[DEBUG] Running fio for hotrw: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=randrw --rwmixread=70 --bs=$BLOCK_SIZE --random_distribution=zipf:1.2 --randrepeat=0 \
-                --random_generator=tausworthe --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
-                --randrepeat=0 --random_generator=tausworthe --output-format=json
-              ;;
-            hotwrite)
-              echo "[DEBUG] Running fio for hotwrite: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=randwrite --bs=$BLOCK_SIZE --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe \
-                --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based --randrepeat=0 --output-format=json
-              ;;
-            randrw)
-              echo "[DEBUG] Running fio for randrw: container ${cid} file ${file_idx}"
-              docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
-                --rw=randrw --rwmixread=50 --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
-                --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
-                --randrepeat=0 --random_generator=tausworthe --output-format=json
-              ;;
-          esac
-
-        done
-      ) & 
-    done
-    wait
-    echo "[Round $((round + 1))] Group ${containers[*]} 完成"
-  done
-}
-
-for pass in $(seq 1 $TOTAL_PASSES); do
-  echo "========== 大轮 $pass 开始 =========="
-  run_group_write "$pass" "${GROUP1[@]}" &
-  run_group_write "$pass" "${GROUP2[@]}" &
-  wait
-  echo "========== 大轮 $pass 完成 =========="
-done
-
-echo "[STEP 3] 写入完成，停止容器..."
-for i in $(seq 1 $NUM_CONTAINERS); do
-  docker stop "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true
-done
-
-echo "[DONE] 所有容器关闭，实验结束"
+if [ "$missing" -gt 0 ]; then
+  echo "[DONE] Completed with ${missing} missing JSON outputs. See logs under ${OUT_DIR}/c*/"
+else
+  echo "[DONE] All JSON outputs present under ${OUT_DIR}/c*/"
+fi
