@@ -12,7 +12,7 @@ set -euo pipefail
 
 RESULT_DIR="${RESULT_DIR:-./results}"
 CONTAINER_PREFIX="docker_blktest"
-TEST_FILE="/out/testfile.dat"  # Updated test file path to ensure correct mounting
+CONTAINER_TEST_FILE="/mnt/testfile.dat"  # Container internal test file path
 
 # Workload parameters
 RUNTIME="${RUNTIME:-60}"                 # seconds per container
@@ -88,14 +88,14 @@ prepare_container() {
 
   install_fio "$name" "$image"
 
-  echo "[PREP] $name create test file $FILE_SIZE at $TEST_FILE"
+  echo "[PREP] $name create test file $FILE_SIZE at $CONTAINER_TEST_FILE"
   # Check file creation step and log
   docker exec "$name" sh -lc "
-    if [ ! -f $TEST_FILE ]; then
+    if [ ! -f $CONTAINER_TEST_FILE ]; then
       echo 'ERROR: Test file not found! Creating it now...'
-      dd if=/dev/zero of=$TEST_FILE bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none
+      dd if=/dev/zero of=$CONTAINER_TEST_FILE bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none
     else
-      echo 'INFO: Test file exists at $TEST_FILE.'
+      echo 'INFO: Test file exists at $CONTAINER_TEST_FILE.'
     fi"
 }
 
@@ -103,22 +103,22 @@ fio_cmd_for_workload() {
   local wl="$1"
   case "$wl" in
     seqrw)
-      echo "fio --name=seqrw --filename=${TEST_FILE} --rw=readwrite --rwmixread=${RWMIXREAD_SEQ} --bs=${BS_SEQ} --ioengine=libaio --iodepth=${IODEPTH_SEQ} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=seqrw --filename=${CONTAINER_TEST_FILE} --rw=readwrite --rwmixread=${RWMIXREAD_SEQ} --bs=${BS_SEQ} --ioengine=libaio --iodepth=${IODEPTH_SEQ} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     seqwrite)
-      echo "fio --name=seqwrite --filename=${TEST_FILE} --rw=write --bs=${BS_SEQ} --ioengine=libaio --iodepth=${IODEPTH_SEQ} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=seqwrite --filename=${CONTAINER_TEST_FILE} --rw=write --bs=${BS_SEQ} --ioengine=libaio --iodepth=${IODEPTH_SEQ} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     randwrite)
-      echo "fio --name=randwrite --filename=${TEST_FILE} --rw=randwrite --bs=${BS_RAND} --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=randwrite --filename=${CONTAINER_TEST_FILE} --rw=randwrite --bs=${BS_RAND} --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     hotrw)
-      echo "fio --name=hotrw --filename=${TEST_FILE} --rw=randrw --rwmixread=70 --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=hotrw --filename=${CONTAINER_TEST_FILE} --rw=randrw --rwmixread=70 --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     hotwrite)
-      echo "fio --name=hotwrite --filename=${TEST_FILE} --rw=randwrite --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=hotwrite --filename=${CONTAINER_TEST_FILE} --rw=randwrite --bs=${BS_RAND} --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     randrw)
-      echo "fio --name=randrw --filename=${TEST_FILE} --rw=randrw --rwmixread=${RWMIXREAD_RAND} --bs=${BS_RAND} --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
+      echo "fio --name=randrw --filename=${CONTAINER_TEST_FILE} --rw=randrw --rwmixread=${RWMIXREAD_RAND} --bs=${BS_RAND} --ioengine=libaio --iodepth=${IODEPTH_RAND} --direct=1 --time_based --runtime=${RUNTIME} --numjobs=1 --group_reporting=1 --output-format=json"
       ;;
     *)
       echo "echo 'Unknown workload: ${wl}'; exit 1"
