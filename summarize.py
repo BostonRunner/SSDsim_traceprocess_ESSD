@@ -18,13 +18,13 @@ def parse_one_json(jf: Path):
         wr = job.get("write", {}) or {}
         bw = float(rd.get("bw_bytes", 0.0)) + float(wr.get("bw_bytes", 0.0))  # bytes/s
         iops = float(rd.get("iops", 0.0)) + float(wr.get("iops", 0.0))
-        return bw, iops
+        write_latency = float(wr.get("lat_ns", 0.0)) / 1000000  # Convert to ms
+        return bw, iops, write_latency
     except Exception:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
 for rdir in result_dirs:
     N = int(''.join(filter(str.isdigit, rdir.name)) or 0)
-    # workload mapping file (optional)
     wl_map = {}
     wl_file = rdir / "workloads.json"
     if wl_file.exists():
@@ -37,16 +37,17 @@ for rdir in result_dirs:
         cid = int(cdir.name[1:])
         jsons = sorted(cdir.glob("fio_*.json"))
         if not jsons:
-            # also try pattern with explicit name
             jsons = sorted(cdir.glob("fio_c*.json"))
         total_bw = 0.0
         total_iops = 0.0
+        total_latency = 0.0
         n = 0
         workload = wl_map.get(f"c{cid}", "")
         for jf in jsons:
-            bw, iops = parse_one_json(jf)
+            bw, iops, latency = parse_one_json(jf)
             total_bw += bw
             total_iops += iops
+            total_latency += latency
             n += 1
             if not workload:
                 m = wl_regex.search(jf.name)
@@ -61,12 +62,13 @@ for rdir in result_dirs:
             "workload": workload,
             "bw_MBps": total_bw / n / (1024*1024),
             "iops": total_iops / n,
+            "write_latency_ms": total_latency / n,
             "jobs_count": n
         })
 
 out_csv = root / "summary.csv"
 with open(out_csv, "w", newline="") as f:
-    w = csv.DictWriter(f, fieldnames=["result_dir","N","container","workload","bw_MBps","iops","jobs_count"])
+    w = csv.DictWriter(f, fieldnames=["result_dir","N","container","workload","bw_MBps","iops","write_latency_ms","jobs_count"])
     w.writeheader()
     for row in sorted(rows, key=lambda r: (r["N"], r["container"])):
         w.writerow(row)
