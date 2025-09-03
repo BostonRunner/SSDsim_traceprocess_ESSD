@@ -95,38 +95,44 @@ run_group_write() {
           local rand_kb=$((1800 + RANDOM % 401))
           echo "[Pass $round_idx][C$cid][F$file_idx] ${rand_kb}KB"
 
-          # Execute fio command for the respective workload
+          # Log fio command and execute it
           case "${WORKLOADS[$((cid - 1))]}" in
             seqrw)
+              echo "[DEBUG] Running fio for seqrw: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=readwrite --rwmixread=50 --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
                 --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
                 --randrepeat=0 --random_generator=tausworthe --output-format=json
               ;;
             seqwrite)
+              echo "[DEBUG] Running fio for seqwrite: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=write --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
                 --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
                 --randrepeat=0 --random_generator=tausworthe --output-format=json
               ;;
             randwrite)
+              echo "[DEBUG] Running fio for randwrite: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=randwrite --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
                 --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
                 --randrepeat=0 --random_generator=tausworthe --output-format=json
               ;;
             hotrw)
+              echo "[DEBUG] Running fio for hotrw: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=randrw --rwmixread=70 --bs=$BLOCK_SIZE --random_distribution=zipf:1.2 --randrepeat=0 \
                 --random_generator=tausworthe --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
                 --randrepeat=0 --random_generator=tausworthe --output-format=json
               ;;
             hotwrite)
+              echo "[DEBUG] Running fio for hotwrite: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=randwrite --bs=$BLOCK_SIZE --random_distribution=zipf:1.2 --randrepeat=0 --random_generator=tausworthe \
                 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based --randrepeat=0 --output-format=json
               ;;
             randrw)
+              echo "[DEBUG] Running fio for randrw: container ${cid} file ${file_idx}"
               docker exec "$container" fio --name="c${cid}_f${file_idx}" --filename=$TEST_DIR/file${file_idx}.dat \
                 --rw=randrw --rwmixread=50 --bs=$BLOCK_SIZE --size="${rand_kb}K" --offset=0 --offset_increment=10K \
                 --random_distribution=zipf --overwrite=1 --ioengine=sync --direct=1 --numjobs=1 --runtime=3 --time_based \
