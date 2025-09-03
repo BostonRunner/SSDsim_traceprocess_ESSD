@@ -12,7 +12,7 @@ set -euo pipefail
 
 RESULT_DIR="${RESULT_DIR:-./results}"
 CONTAINER_PREFIX="docker_blktest"
-TEST_FILE="/mnt/testfile.dat"
+TEST_FILE="/out/testfile.dat"  # Updated test file path to ensure correct mounting
 
 # Workload parameters
 RUNTIME="${RUNTIME:-60}"                 # seconds per container
@@ -93,9 +93,9 @@ prepare_container() {
   docker exec "$name" sh -lc "
     if [ ! -f $TEST_FILE ]; then
       echo 'ERROR: Test file not found! Creating it now...'
-      dd if=/dev/zero of=$TEST_FILE bs=1M count=1024 status=none
+      dd if=/dev/zero of=$TEST_FILE bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none
     else
-      echo 'INFO: Test file exists.'
+      echo 'INFO: Test file exists at $TEST_FILE.'
     fi"
 }
 
