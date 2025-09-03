@@ -1,5 +1,6 @@
 #!/bin/bash
-# 6 containers, fixed names; fio runs with direct=1 on a bind-mounted host dir.
+# 6 containers, each with a Docker named volume at /data (NOT a host bind-mount).
+# fio runs with direct=1 on /data/testfile.dat; results JSON+logs go to /out (host-visible).
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
@@ -7,13 +8,12 @@ RUN_TAG="${RUN_TAG:-result6}"
 OUT_DIR="${RESULT_ROOT}/${RUN_TAG}"
 IMAGE="${IMAGE:-ubuntu:22.04}"
 CONTAINER_PREFIX="docker_blktest"
-
-# Test file lives on a host bind mount to ensure O_DIRECT works
+DATA_VOL_PREFIX="${DATA_VOL_PREFIX:-blktest_data_c}"   # e.g. blktest_data_c1..c6
 TEST_FILE="/data/testfile.dat"
 FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
 
-# fio knobs (seq vs rand)
+# fio knobs
 BS_SEQ="${BS_SEQ:-128k}"
 BS_RAND="${BS_RAND:-16k}"
 IODEPTH_SEQ="${IODEPTH_SEQ:-1}"
@@ -26,10 +26,10 @@ WORKLOADS=(seqrw seqwrite randwrite hotrw hotwrite randrw)
 
 mkdir -p "${OUT_DIR}"
 for i in $(seq 1 6); do
-  mkdir -p "${OUT_DIR}/c${i}/data"
+  mkdir -p "${OUT_DIR}/c${i}"
 done
 
-# Mapping (给 summarize 用)
+# workload mapping for summarizer
 {
   printf '{'
   for i in $(seq 1 6); do
@@ -44,21 +44,30 @@ echo "[CLEANUP] removing old containers..."
 for i in $(seq 1 6); do docker rm -f "${CONTAINER_PREFIX}${i}" >/dev/null 2>&1 || true & done
 wait
 
+# ensure named volumes exist
+for i in $(seq 1 6); do
+  vol="${DATA_VOL_PREFIX}${i}"
+  if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+    echo "[VOLUME] creating $vol"
+    docker volume create "$vol" >/dev/null
+  fi
+done
+
 launch_container() {
   local idx=$1
   local name="${CONTAINER_PREFIX}${idx}"
   local mount_out="$(realpath "${OUT_DIR}/c${idx}")"
-  local mount_data="$(realpath "${OUT_DIR}/c${idx}/data")"
-  echo "[INIT] launching ${name}"
-  if docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${mount_data}:/data" "${IMAGE}" bash >/dev/null 2>&1; then :; else
+  local vol="${DATA_VOL_PREFIX}${idx}"
+  echo "[INIT] launching ${name} (out->/out, volume ${vol}->/data)"
+  if docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${IMAGE}" bash >/dev/null 2>&1; then :; else
     docker rm -f "${name}" >/dev/null 2>&1 || true
-    docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${mount_data}:/data" "${IMAGE}" sh >/dev/null
+    docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${IMAGE}" sh >/dev/null
   fi
 }
 
 for i in $(seq 1 6); do launch_container "$i" & done
 wait
-echo "[STEP] containers up: ${CONTAINER_PREFIX}1..6"
+echo "[STEP] containers up: ${CONTAINER_PREFIX}1..6 (data on named volumes)"
 
 install_fio() {
   local name="$1"
@@ -71,13 +80,15 @@ prepare_file() {
   local name="$1"
   echo "[PREP] ${name}: ${FILE_SIZE} -> ${TEST_FILE}"
   docker exec "${name}" sh -lc "fallocate -l ${FILE_SIZE} ${TEST_FILE} 2>/dev/null || dd if=/dev/zero of=${TEST_FILE} bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none"
+  # quick verify
+  docker exec "${name}" sh -lc "ls -lh ${TEST_FILE} && stat -c '%s' ${TEST_FILE}" >/dev/null 2>&1 || true
 }
 
 for i in $(seq 1 6); do install_fio "${CONTAINER_PREFIX}${i}" & done
 wait
 for i in $(seq 1 6); do prepare_file "${CONTAINER_PREFIX}${i}" & done
 wait
-echo "[STEP] test files ready (bind-mounted, O_DIRECT-capable)"
+echo "[STEP] test files ready on /data (named volumes), direct=1 will be honored"
 
 fio_cmd() {
   local wl="$1"
@@ -103,11 +114,10 @@ fio_cmd() {
   esac
 }
 
-# ---- docker stats sampler (修复 csv 无数据) ----
+# ---- docker stats sampler (per-second while fio runs) ----
 start_stats() {
   local out="${OUT_DIR}/docker_stats.csv"
   echo "ts_ms,container,cpu_perc,mem_usage,mem_perc,net_io,block_io,pids" > "${out}"
-  # 每秒采一次当前 6 个容器，直到被 kill
   bash -c '
     while true; do
       docker stats --no-stream --format "{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.MemPerc}},{{.NetIO}},{{.BlockIO}},{{.PIDs}}" \
@@ -136,8 +146,8 @@ stop_stats() {
 }
 trap stop_stats EXIT
 
-# ---- launch fio (concurrently) ----
-echo "[STEP] starting fio (direct=1, bind-mounted)..."
+# ---- run fio concurrently ----
+echo "[STEP] starting fio (direct=1 on /data)"
 start_stats
 
 pids=()
