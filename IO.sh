@@ -7,6 +7,7 @@
 # 4: hotrw      -> 热点读写（Zipf，读多写少）
 # 5: hotwrite   -> 热点写（Zipf）
 # 6: randrw     -> 随机读写（50/50）
+
 set -euo pipefail
 
 RESULT_DIR="${RESULT_DIR:-./results}"
@@ -66,9 +67,7 @@ install_fio() {
     opensuse*)
       docker exec "$container" bash -lc "zypper --non-interactive install fio" ;;
     *)
-      # best effort
-      docker exec "$container" sh -lc "apk add --no-cache fio || (apt-get update && apt-get install -y fio) || true"
-      ;;
+      docker exec "$container" sh -lc "apk add --no-cache fio || (apt-get update && apt-get install -y fio) || true" ;;
   esac
 }
 
@@ -90,7 +89,6 @@ prepare_container() {
   install_fio "$name" "$image"
 
   echo "[PREP] $name create test file $FILE_SIZE at $TEST_FILE"
-  # Try fallocate first, fall back to dd
   docker exec "$name" sh -lc "which fallocate >/dev/null 2>&1 && fallocate -l $FILE_SIZE $TEST_FILE || dd if=/dev/zero of=$TEST_FILE bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none || true"
 }
 
@@ -137,7 +135,7 @@ for i in $(seq 1 $NUM_CONTAINERS); do
   cmd="$(fio_cmd_for_workload "$wl") --output=${out}"
   echo "[RUN] c${i} -> ${wl}"
   # run in background
-  docker exec "$name" sh -lc "$cmd" >/dev/null 2>&1 &
+  docker exec "$name" sh -lc "$cmd" >/dev/null 2>&1 & 
   pids+=($!)
 done
 
