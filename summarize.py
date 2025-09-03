@@ -15,16 +15,10 @@ def parse_one_json(jf: Path):
         # Log the file being parsed for debugging
         print(f"[DEBUG] Parsing file: {jf}")
         
-        # Check if file exists
-        if not jf.exists():
-            print(f"[ERROR] File {jf} does not exist!")
-            return 0.0, 0.0, 0.0
-        
+        # Load and print the entire JSON content for debugging
         with open(jf, "r") as f:
             data = json.load(f)
-        
-        # Log JSON content for debugging
-        print(f"[DEBUG] JSON data from {jf}: {json.dumps(data, indent=2)}")
+            print(f"[DEBUG] JSON data from {jf}: {json.dumps(data, indent=2)}")
         
         job = data["jobs"][0]
         
