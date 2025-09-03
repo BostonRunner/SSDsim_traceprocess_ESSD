@@ -89,7 +89,14 @@ prepare_container() {
   install_fio "$name" "$image"
 
   echo "[PREP] $name create test file $FILE_SIZE at $TEST_FILE"
-  docker exec "$name" sh -lc "which fallocate >/dev/null 2>&1 && fallocate -l $FILE_SIZE $TEST_FILE || dd if=/dev/zero of=$TEST_FILE bs=1M count=$(( ${FILE_SIZE%G} * 1024 )) status=none || true"
+  # Check file creation step and log
+  docker exec "$name" sh -lc "
+    if [ ! -f $TEST_FILE ]; then
+      echo 'ERROR: Test file not found! Creating it now...'
+      dd if=/dev/zero of=$TEST_FILE bs=1M count=1024 status=none
+    else
+      echo 'INFO: Test file exists.'
+    fi"
 }
 
 fio_cmd_for_workload() {
