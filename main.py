@@ -1,111 +1,108 @@
-import os
-import sys
+#!/usr/bin/env python3
+# Summarize per-container fio JSON outputs (read + write) and include workload type when available.
+import json, sys, os, glob, csv, re
+from pathlib import Path
 
-# 可选参数：结果目录，默认 ./results
-result_dir = sys.argv[1] if len(sys.argv) > 1 else "./results"
+root = Path(sys.argv[1] if len(sys.argv) > 1 else "./results_all")
+rows = []
+result_dirs = sorted([p for p in root.glob("result*") if p.is_dir()],
+                     key=lambda p: int(''.join(filter(str.isdigit, p.name)) or 0))
 
-# 路径定义
-input_file_path = os.path.join(result_dir, "result.txt")
-output_file_path = os.path.join(result_dir, "result_path.txt")
-device_path = "/dev/vdb"
+wl_regex = re.compile(r'fio_c(\d+)_(\w+)\.json$')
 
-# 获取容器 UpperDir 和 LowerDir 信息
-def get_overlay_paths(container_name):
-    info = os.popen(f"docker container inspect {container_name}").readlines()
-    lower_dirs = []
-    upper_dir = ""
-    for line in info:
-        if "LowerDir" in line:
-            raw = line.split('"')[-2]
-            if ':' in raw:
-                lower_dirs = [d for d in raw.split(':') if "init" not in d]
-        elif "UpperDir" in line:
-            upper_dir = line.split('"')[-2]
-    return upper_dir, lower_dirs
+def parse_one_json(jf: Path):
+    try:
+        # Log the file being parsed for debugging
+        print(f"[DEBUG] Parsing file: {jf}")
+        
+        # Load and print the entire JSON content for debugging
+        with open(jf, "r") as f:
+            data = json.load(f)
+            print(f"[DEBUG] JSON data from {jf}: {json.dumps(data, indent=2)}")
+        
+        job = data["jobs"][0]
+        
+        # Debugging job structure
+        print(f"[DEBUG] Job data: {job}")
+        
+        # Reading write and read data from fio job result
+        rd = job.get("read", {}) or {}
+        wr = job.get("write", {}) or {}
+        
+        # Extract bandwidth and iops from both read and write sections
+        bw = float(rd.get("bw_bytes", 0.0)) + float(wr.get("bw_bytes", 0.0))  # bytes/s
+        iops = float(rd.get("iops", 0.0)) + float(wr.get("iops", 0.0))
+        
+        # Extract write latency (in ns, convert to ms)
+        write_latency = float(wr.get("lat_ns", 0.0)) / 1000000  # Convert to ms
+        
+        # Debugging bandwidth, IOPS, and latency values
+        print(f"[DEBUG] bw: {bw}, iops: {iops}, write_latency: {write_latency}")
+        
+        return bw, iops, write_latency
+    except Exception as e:
+        # Log the error and return default values
+        print(f"[ERROR] Error parsing file {jf}: {e}")
+        return 0.0, 0.0, 0.0
 
-# 收集 overlay 路径（动态容器数量）
-upper_dirs = []
-lower_dirs = []
-max_containers = int(os.getenv("USE_CONTAINERS", 6))  # 默认6个容器
-for i in range(1, max_containers + 1):
-    u, l = get_overlay_paths(f"docker_blktest{i}")
-    upper_dirs.append(u)
-    lower_dirs.append(l)
-
-# 读取 trace 日志
-# 初始化结果文件
-with open(output_file_path, "w") as f:
-    pass  # 清空旧文件内容或创建新文件
-
-with open(input_file_path, "r") as infile:
-    trace_lines = infile.readlines()
-
-result_lines = []
-batch_size = 90000  # 每15分钟写一次
-
-with open(output_file_path, "a") as outfile:  # 追加写
-    for i, line in enumerate(trace_lines):
+for rdir in result_dirs:
+    N = int(''.join(filter(str.isdigit, rdir.name)) or 0)
+    # workload mapping file (optional)
+    wl_map = {}
+    wl_file = rdir / "workloads.json"
+    if wl_file.exists():
         try:
-            parts = line.strip().split()
-            if len(parts) < 10:
-                continue
-            sector_idx = parts.index('+') - 1 if '+' in parts else -1
-            if sector_idx == -1 or not parts[sector_idx].isdigit():
-                continue
+            wl_map = json.load(open(wl_file, "r"))
+        except Exception:
+            wl_map = {}
 
-            block = int(int(parts[sector_idx]) / 8)
-
-            icheck_cmd = f"debugfs -R 'icheck {block}' {device_path}"
-            icheck_result = os.popen(icheck_cmd).readlines()
-            if not icheck_result:
-                continue
-            inode_line = icheck_result[-1]
-            inode_parts = inode_line.strip().split()
-            if not inode_parts or not inode_parts[-1].isdigit():
-                continue
-            inode = int(inode_parts[-1])
-            if inode == 8:
-                continue
-
-            ncheck_cmd = f"debugfs -R 'ncheck {inode}' {device_path}"
-            ncheck_result = os.popen(ncheck_cmd).readlines()
-            if not ncheck_result:
-                continue
-            path_line = ncheck_result[-1].strip()
-            file_path = "/mnt/docker_tmp" + path_line.split()[-1]
-
-            label = ""
-            container_id = -1
-            for idx in range(max_containers):
-                if file_path.startswith(upper_dirs[idx]):
-                    label = "[UpperLayer]"
-                    container_id = idx + 1
-                    break
-                elif any(ld in file_path for ld in lower_dirs[idx]):
-                    label = "[LowerLayer]"
-                    container_id = idx + 1
-                    break
-
-            if label and container_id != -1:
-                result_lines.append(f"{line.strip()}\t{file_path}\t{label}\t[Container{container_id}]\n")
-
-        except Exception as e:
-            print(f"\nError at line {i}: {e}")
+    for cdir in sorted(rdir.glob("c*"), key=lambda p: int(p.name[1:])):
+        cid = int(cdir.name[1:])
+        jsons = sorted(cdir.glob("fio_*.json"))
+        if not jsons:
+            jsons = sorted(cdir.glob("fio_c*.json"))
+        
+        total_bw = 0.0
+        total_iops = 0.0
+        total_latency = 0.0
+        n = 0
+        workload = wl_map.get(f"c{cid}", "")
+        
+        for jf in jsons:
+            bw, iops, latency = parse_one_json(jf)
+            total_bw += bw
+            total_iops += iops
+            total_latency += latency
+            n += 1
+            if not workload:
+                m = wl_regex.search(jf.name)
+                if m:
+                    workload = m.group(2)
+        
+        # Avoid division by zero
+        if n == 0:
             continue
+        
+        # Log the result for each container
+        print(f"[DEBUG] N: {N}, Container: {cid}, BW: {total_bw / n}, IOPS: {total_iops / n}, Write Latency: {total_latency / n}")
+        
+        rows.append({
+            "result_dir": rdir.name,
+            "N": N,
+            "container": cid,
+            "workload": workload,
+            "bw_MBps": total_bw / n / (1024*1024),  # Convert to MB/s
+            "iops": total_iops / n,
+            "write_latency_ms": total_latency / n,
+            "jobs_count": n
+        })
 
-        if (i + 1) % batch_size == 0:
-            outfile.writelines(result_lines)
-            outfile.flush()
-            os.fsync(outfile.fileno())
-            result_lines.clear()
+# Ensure the output directory exists
+out_csv = root / "summary.csv"
+with open(out_csv, "w", newline="") as f:
+    w = csv.DictWriter(f, fieldnames=["result_dir", "N", "container", "workload", "bw_MBps", "iops", "write_latency_ms", "jobs_count"])
+    w.writeheader()
+    for row in sorted(rows, key=lambda r: (r["N"], r["container"])):
+        w.writerow(row)
 
-        sys.stdout.write(f"\rProcessing: {i+1}/{len(trace_lines)} ({(i+1)/len(trace_lines)*100:.2f}%)")
-        sys.stdout.flush()
-
-    # 最后一批写入
-    if result_lines:
-        outfile.writelines(result_lines)
-        outfile.flush()
-        os.fsync(outfile.fileno())
-
-print("\nProcessing complete! Incremental results written to result_path.txt.")
+print(f"Wrote {out_csv}")
