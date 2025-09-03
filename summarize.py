@@ -15,7 +15,11 @@ def parse_one_json(jf: Path):
         # Log the file being parsed for debugging
         print(f"[DEBUG] Parsing file: {jf}")
         
-        data = json.load(open(jf, "r"))
+        # Load and print the entire JSON content for debugging
+        with open(jf, "r") as f:
+            data = json.load(f)
+            print(f"[DEBUG] JSON data from {jf}: {json.dumps(data, indent=2)}")
+        
         job = data["jobs"][0]
         
         # Debugging job structure
