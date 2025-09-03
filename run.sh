@@ -10,6 +10,8 @@ ROOT_RESULT_DIR="${ROOT_RESULT_DIR:-./results_all}"
 
 mkdir -p "$ROOT_RESULT_DIR"
 
+docker system prune -af --volumes
+
 # -------- SSD info (size + some queue params) --------
 SSD_INFO_PATH="$ROOT_RESULT_DIR/ssd_info.txt"
 {
