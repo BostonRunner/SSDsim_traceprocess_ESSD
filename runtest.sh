@@ -1,3 +1,3 @@
 docker system prune -af --volumes
-./IO.sh
+./test.sh
 python3 summarize.py ./results_all
