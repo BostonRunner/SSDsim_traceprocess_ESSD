@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import shutil
+import csv
 from pathlib import Path
 
 # Function to handle saving results in separate directories based on container count
@@ -56,6 +57,52 @@ def copy_results_from_containers(base_result_dir, test_type="single"):
                 shutil.copy(json_file, save_dir / f"container_{container_num}")
 
     print(f"[INFO] Results for all containers have been copied.")
+    return save_dir
+
+# Function to generate summary CSV for single and multi-container tests
+def generate_summary_csv(base_result_dir, save_dir, test_type="single"):
+    rows = []
+    result_dirs = [save_dir]
+
+    if test_type == "single":
+        # Single container test
+        container_count = 1
+    elif test_type == "multi":
+        # Multi container test
+        container_count = 6
+    else:
+        raise ValueError("Invalid test_type. Must be 'single' or 'multi'.")
+
+    for rdir in result_dirs:
+        for container_num in range(1, container_count + 1):
+            container_dir = rdir / f"container_{container_num}"
+            json_files = sorted(container_dir.glob("fio_c*.json"))
+
+            for json_file in json_files:
+                with open(json_file, "r") as f:
+                    data = json.load(f)
+                    job = data.get("jobs", [{}])[0]
+                    rd = job.get("read", {})
+                    wr = job.get("write", {})
+                    bw = float(rd.get("bw_bytes", 0)) + float(wr.get("bw_bytes", 0))
+                    iops = float(rd.get("iops", 0)) + float(wr.get("iops", 0))
+                    lat = job.get("lat_ns", {}).get("mean", 0) / 1e6  # Convert latency to ms
+                    rows.append({
+                        "container": container_num,
+                        "workload": json_file.stem.split("_")[-1],
+                        "bw_MBps": bw / (1024 * 1024),
+                        "iops": iops,
+                        "write_latency_ms": lat,
+                    })
+
+    # Write the results into summary.csv
+    summary_file = save_dir / "summary.csv"
+    with open(summary_file, mode="w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["container", "workload", "bw_MBps", "iops", "write_latency_ms"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"[INFO] Summary CSV generated at {summary_file}")
 
 if __name__ == "__main__":
     # Ensure the script is executed with the required parameters
@@ -68,4 +115,7 @@ if __name__ == "__main__":
     test_type = sys.argv[2]  # 'single' or 'multi'
 
     # Call the function to copy results
-    copy_results_from_containers(base_result_dir, test_type)
+    save_dir = copy_results_from_containers(base_result_dir, test_type)
+
+    # Generate summary CSV for the given test type
+    generate_summary_csv(base_result_dir, save_dir, test_type)
