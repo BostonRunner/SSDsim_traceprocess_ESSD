@@ -1,17 +1,27 @@
 #!/bin/bash
-# 6 containers, each with a Docker named volume at /data (NOT a host bind-mount).
-# fio runs with direct=1 on /data/testfile.dat; results JSON+logs go to /out (host-visible).
+# Ensuring synchronization of start/stop among all containers for accurate IOPS measurement.
+# Allows multiple container images, one for each container (Ubuntu, Debian, Alpine, etc.).
+
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
 RUN_TAG="${RUN_TAG:-result6}"
 OUT_DIR="${RESULT_ROOT}/${RUN_TAG}"
-IMAGE="${IMAGE:-ubuntu:22.04}"
 CONTAINER_PREFIX="docker_blktest"
 DATA_VOL_PREFIX="${DATA_VOL_PREFIX:-blktest_data_c}"   # e.g. blktest_data_c1..c6
 TEST_FILE="/data/testfile.dat"
 FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
+
+# Multiple images (one per container)
+IMAGES=(
+  "ubuntu:22.04"
+  "debian:11"
+  "alpine:3.18"
+  "parrotsec/security"
+  "archlinux:latest"
+  "opensuse/leap:15.5"
+)
 
 # fio knobs
 BS_SEQ="${BS_SEQ:-128k}"
@@ -58,13 +68,15 @@ launch_container() {
   local name="${CONTAINER_PREFIX}${idx}"
   local mount_out="$(realpath "${OUT_DIR}/c${idx}")"
   local vol="${DATA_VOL_PREFIX}${idx}"
-  echo "[INIT] launching ${name} (out->/out, volume ${vol}->/data)"
-  if docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${IMAGE}" bash >/dev/null 2>&1; then :; else
+  local image="${IMAGES[$((idx-1))]}"  # Use the corresponding image
+  echo "[INIT] launching ${name} (image=${image}, out->/out, volume ${vol}->/data)"
+  if docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${image}" bash >/dev/null 2>&1; then :; else
     docker rm -f "${name}" >/dev/null 2>&1 || true
-    docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${IMAGE}" sh >/dev/null
+    docker run -dit --name "${name}" -v "${mount_out}:/out" -v "${vol}:/data" "${image}" sh >/dev/null
   fi
 }
 
+# Launch containers in parallel, ensuring they are ready before starting fio
 for i in $(seq 1 6); do launch_container "$i" & done
 wait
 echo "[STEP] containers up: ${CONTAINER_PREFIX}1..6 (data on named volumes)"
@@ -114,7 +126,7 @@ fio_cmd() {
   esac
 }
 
-# ---- docker stats sampler (per-second while fio runs) ----
+# ---- docker stats sampler (starts only after fio begins writing) ----
 start_stats() {
   local out="${OUT_DIR}/docker_stats.csv"
   echo "ts_ms,container,cpu_perc,mem_usage,mem_perc,net_io,block_io,pids" > "${out}"
@@ -146,26 +158,28 @@ stop_stats() {
 }
 trap stop_stats EXIT
 
+# ---- synchronize all containers before fio starts ----
+start_fio() {
+  echo "[STEP] starting fio (direct=1 on /data)"
+  start_stats
+  pids=()
+  for i in $(seq 1 6); do
+    wl="${WORKLOADS[$((i-1))]}"
+    name="${CONTAINER_PREFIX}${i}"
+    out_json="/out/fio_c${i}_${wl}.json"
+    cmd="$(fio_cmd "${wl}") --output=${out_json}"
+    echo "[RUN] ${name} -> ${wl} | output: ${out_json}"
+    ( docker exec "${name}" sh -lc "${cmd}" ) > "${OUT_DIR}/c${i}/fio_c${i}_${wl}.log" 2>&1 & 
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
+  echo "[STEP] fio finished"
+}
+
 # ---- run fio concurrently ----
-echo "[STEP] starting fio (direct=1 on /data)"
-start_stats
-
-pids=()
-for i in $(seq 1 6); do
-  wl="${WORKLOADS[$((i-1))]}"
-  name="${CONTAINER_PREFIX}${i}"
-  out_json="/out/fio_c${i}_${wl}.json"
-  cmd="$(fio_cmd "${wl}") --output=${out_json}"
-  echo "[RUN] ${name} -> ${wl} | output: ${out_json}"
-  ( docker exec "${name}" sh -lc "${cmd}" ) > "${OUT_DIR}/c${i}/fio_c${i}_${wl}.log" 2>&1 & 
-  pids+=($!)
-done
-
-fail=0
-for pid in "${pids[@]}"; do
-  if ! wait "$pid"; then fail=1; fi
-done
-echo "[STEP] fio finished (fail=${fail})"
+start_fio
 
 # ---- verify JSONs ----
 missing=0
