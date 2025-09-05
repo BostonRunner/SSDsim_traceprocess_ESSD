@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Run FIO for a single container (by id 1..6 or full name docker_blktestN).
-# 单轮：准备 -> 安装fio(若无) -> 生成测试文件 -> 跑fio -> 回拷JSON/LOG
+# 对单个容器（编号1..6或名字docker_blktestN）执行一轮fio：
+# 1) 确保容器运行
+# 2) 容器内先 update/refresh，再安装 fio（若未安装）
+# 3) 生成测试文件 -> 跑 fio -> 回拷 JSON/LOG
 set -euo pipefail
 
-# -------- Config (env可覆盖) ----------
+# -------- 可用环境变量覆盖 ----------
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
 FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
@@ -13,7 +15,7 @@ BS_SEQ="${BS_SEQ:-128k}"
 IODEPTH_SEQ="${IODEPTH_SEQ:-1}"
 BS_RAND="${BS_RAND:-16k}"
 IODEPTH_RAND="${IODEPTH_RAND:-16}"
-# --------------------------------------
+# ------------------------------------
 
 die(){ echo "[ERROR] $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
@@ -46,7 +48,7 @@ OUT_DIR="${RESULT_ROOT}/c${CID}"
 mkdir -p "$OUT_DIR"
 TEST_FILE="/data/testfile.dat"
 
-# 映射：与并发6容器一致
+# 与并发6容器保持一致的 workload 映射
 case "$CID" in
   1) WL="seqrw";     FIO_OPS="--rw=readwrite --rwmixread=50 --bs=${BS_SEQ}  --iodepth=${IODEPTH_SEQ}" ;;
   2) WL="seqwrite";  FIO_OPS="--rw=write      --bs=${BS_SEQ}  --iodepth=${IODEPTH_SEQ}" ;;
@@ -57,22 +59,27 @@ case "$CID" in
   *) die "unsupported container id: $CID (expect 1..6)";;
 esac
 
-# ---- 在容器内安装 fio（不改源，直接用原生包管理器） ----
-echo "[INFO] (${CNAME}) ensure fio installed (no mirror change)..."
+# ---- 容器内先 update/refresh，再安装 fio（若未安装） ----
+echo "[INFO] (${CNAME}) ensure fio installed (update first, then install)..."
 if ! docker exec "$CNAME" sh -lc 'command -v fio >/dev/null 2>&1'; then
   set +e
   docker exec "$CNAME" sh -lc '
     set -e
     if command -v apt-get >/dev/null 2>&1; then
-      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+      apt-get update -o Acquire::Retries=3
+      DEBIAN_FRONTEND=noninteractive apt-get install -y fio
     elif command -v apk >/dev/null 2>&1; then
+      apk update
       apk add --no-cache fio
     elif command -v dnf >/dev/null 2>&1; then
+      dnf -y makecache || true
       dnf -y install fio
     elif command -v yum >/dev/null 2>&1; then
+      yum -y makecache || true
       yum -y install fio
     elif command -v zypper >/dev/null 2>&1; then
-      zypper --non-interactive in -y fio
+      zypper --non-interactive refresh
+      zypper --non-interactive install -y fio
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm fio
     else
@@ -82,7 +89,7 @@ if ! docker exec "$CNAME" sh -lc 'command -v fio >/dev/null 2>&1'; then
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
-    die "fio not available in ${CNAME} (package install failed)."
+    die "fio not available in ${CNAME} (package install failed after update)."
   fi
 fi
 
@@ -104,7 +111,7 @@ docker cp "${CNAME}:${REMOTE_JSON}" "${OUT_DIR}/" || die "failed to copy JSON fr
 docker cp "${CNAME}:${REMOTE_LOG}"  "${OUT_DIR}/" || true
 [[ -s "${OUT_DIR}/$(basename "$REMOTE_JSON")" ]] || die "empty result JSON: ${OUT_DIR}/$(basename "$REMOTE_JSON")"
 
-# 记录映射（可供别的汇总脚本使用）
+# 记录映射（供其它汇总脚本使用）
 WORKLOADS_JSON="${RESULT_ROOT}/workloads_single.json"
 python3 - "$WORKLOADS_JSON" "$CID" "$WL" <<'PY'
 import json,sys,os
