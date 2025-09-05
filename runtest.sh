@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 6轮单容器顺序测试：
+# 6 轮单容器顺序测试：
 # 每轮 i：
 #   - 只处理第 i 个镜像与容器
-#   - 新建命名卷作为 /data（干净盘）
+#   - 新建命名卷 /data（干净盘）
 #   - 运行容器 -> 调用 test.sh i
 #   - 解析刚产出的 JSON 追加到 results_all/single_summary.csv
-#   - 删除该容器与卷，进入下一轮
+#   - 删除该容器与卷
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
@@ -84,7 +84,7 @@ def to_float(v):
         try: return float(v)
         except: return 0.0
     if isinstance(v,dict):
-        for k in ("mean","value","avg"): 
+        for k in ("mean","value","avg"):
             if k in v: return to_float(v[k])
         return 0.0
     return 0.0
@@ -96,7 +96,7 @@ job=jobs[0]
 rd=job.get('read') or {}
 wr=job.get('write') or {}
 
-def bw_bytes(sec): 
+def bw_bytes(sec):
     if not isinstance(sec,dict): return 0.0
     if 'bw_bytes' in sec: return to_float(sec['bw_bytes'])
     return to_float(sec.get('bw',0))*1024.0
