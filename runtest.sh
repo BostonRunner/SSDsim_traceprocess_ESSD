@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 6 轮单容器顺序测试（与 IO.sh 同步的镜像与安装逻辑）：
-#   每轮 i：只拉对应镜像 -> docker run -dit (bash||sh) -> 按镜像类型 update 再 install fio
-#           -> ./test.sh i 产出 JSON/LOG -> 解析 JSON 追加 CSV -> 删除容器（干净盘）
+# 6 轮单容器顺序测试（与 IO.sh 风格一致）：
+# 每轮 i：只拉该轮镜像 -> 起容器 -> 安装 fio（Ubuntu: 失败才换阿里云源） -> ./test.sh i
+#        -> 解析 JSON 追加 CSV -> 删容器（下一轮干净）
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
@@ -10,7 +10,7 @@ FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
 TEST_DIR="${TEST_DIR:-/mnt/testdir}"
 
-# 与 IO.sh 相同的镜像顺序
+# 镜像清单（第一个是 ubuntu:22.04）
 IMAGES=(
   "ubuntu:22.04"
   "opensuse/leap:15.5"
@@ -19,6 +19,9 @@ IMAGES=(
   "alpine:3.18"
   "archlinux:latest"
 )
+
+# Ubuntu 专用：失败回退到阿里云源（固定为阿里云，满足你的要求）
+UBUNTU_MIRROR_URL="${UBUNTU_MIRROR_URL:-https://mirrors.aliyun.com/ubuntu}"
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] missing: $1" >&2; exit 1; }; }
 need docker
@@ -35,34 +38,10 @@ pull_if_missing() {
   fi
 }
 
-install_fio() {
-  local cname="$1"; local image="$2"
-  echo "[INSTALL] 在 ${cname} (${image}) 安装 fio（update -> install）..."
-  case "$image" in
-    ubuntu*|debian*|parrotsec*)
-      docker exec "$cname" bash -lc "apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y fio" ;;
-    alpine*)
-      docker exec "$cname" sh   -lc "apk update && apk add --no-cache fio" ;;
-    archlinux*)
-      docker exec "$cname" bash -lc "pacman -Sy --noconfirm fio" ;;
-    opensuse*|opensuse/*|*leap*)
-      docker exec "$cname" bash -lc "zypper --non-interactive refresh && zypper --non-interactive install -y fio" ;;
-    *)  # 兜底再尝试一遍
-      docker exec "$cname" sh -lc "command -v apt-get >/dev/null && (apt-get update && apt-get install -y fio) || true"
-      docker exec "$cname" sh -lc "command -v apk     >/dev/null && (apk update && apk add --no-cache fio) || true"
-      docker exec "$cname" sh -lc "command -v pacman  >/dev/null && (pacman -Sy --noconfirm fio) || true"
-      docker exec "$cname" sh -lc "command -v zypper  >/dev/null && (zypper --non-interactive refresh && zypper --non-interactive install -y fio) || true"
-      ;;
-  esac
-  docker exec "$cname" sh -lc 'command -v fio >/dev/null 2>&1' || { echo "[ERROR] fio install failed in $cname"; exit 2; }
-}
-
 create_round_container() {
   local idx="$1"
   local name="${CONTAINER_PREFIX}${idx}"
   local img; img="$(image_for "$idx")"
-
-  # 清理残留
   docker rm -f "$name" >/dev/null 2>&1 || true
 
   echo "[RUN ] 启动 ${name} ($img) ..."
@@ -74,13 +53,71 @@ create_round_container() {
     echo "[INFO] $name started with sh (fallback)"
   fi
 
-  install_fio "$name" "$img"
+  # 预创建测试目录
   docker exec "$name" sh -lc "mkdir -p '${TEST_DIR}'"
+}
+
+install_fio() {
+  local cname="$1"; local image="$2"
+  echo "[INSTALL] 在 ${cname} (${image}) 安装 fio：先 update，再 install ..."
+
+  case "$image" in
+    ubuntu:22.04|ubuntu:22.04@*|ubuntu:jammy*|ubuntu:22.*)
+      # 先尝试官方源（不改源）
+      set +e
+      docker exec "$cname" bash -lc '
+        set -e
+        # 避免 IPv6 黑洞
+        echo Acquire::ForceIPv4 \"true\" >/etc/apt/apt.conf.d/99force-ipv4 || true
+        apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+        DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+      '
+      rc=$?
+      set -e
+      if [[ $rc -ne 0 ]]; then
+        echo "[FALLBACK] Ubuntu 官方源不可达，切换到阿里云源：${UBUNTU_MIRROR_URL}"
+        docker exec "$cname" bash -lc "
+          set -e
+          CN=\$(. /etc/os-release; echo \${VERSION_CODENAME:-jammy})
+          cat >/etc/apt/sources.list <<EOF
+deb ${UBUNTU_MIRROR_URL} \${CN} main restricted universe multiverse
+deb ${UBUNTU_MIRROR_URL} \${CN}-updates main restricted universe multiverse
+deb ${UBUNTU_MIRROR_URL} \${CN}-backports main restricted universe multiverse
+deb ${UBUNTU_MIRROR_URL} \${CN}-security main restricted universe multiverse
+EOF
+          apt-get clean
+          apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
+          DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+        "
+      fi
+      ;;
+    debian*|parrotsec*)
+      docker exec "$cname" bash -lc "apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y fio"
+      ;;
+    alpine*)
+      docker exec "$cname" sh   -lc "apk update && apk add --no-cache fio"
+      ;;
+    archlinux*)
+      docker exec "$cname" bash -lc "pacman -Sy --noconfirm fio"
+      ;;
+    opensuse*|*leap*)
+      docker exec "$cname" bash -lc "zypper --non-interactive refresh && zypper --non-interactive install -y fio"
+      ;;
+    *)
+      # 兜底：按常见包管工具尝试
+      docker exec "$cname" sh -lc "command -v apt-get >/dev/null && (apt-get update && apt-get install -y fio) || true"
+      docker exec "$cname" sh -lc "command -v apk     >/dev/null && (apk update && apk add --no-cache fio) || true"
+      docker exec "$cname" sh -lc "command -v pacman  >/dev/null && (pacman -Sy --noconfirm fio) || true"
+      docker exec "$cname" sh -lc "command -v zypper  >/dev/null && (zypper --non-interactive refresh && zypper --non-interactive install -y fio) || true"
+      ;;
+  esac
+
+  docker exec "$cname" sh -lc 'command -v fio >/dev/null 2>&1' || { echo "[ERROR] fio install failed in $cname"; exit 2; }
 }
 
 destroy_round_container() {
   local idx="$1"; local name="${CONTAINER_PREFIX}${idx}"
-  echo "[CLEAN] 删除容器 ${name}（不留卷，下一轮干净盘）"
+  echo "[CLEAN] 删除容器 ${name}"
   docker rm -f "$name" >/dev/null 2>&1 || true
 }
 
@@ -134,13 +171,13 @@ PY
 ensure_csv_header
 for i in $(seq 1 6); do
   echo "========== ROUND ${i}/6 =========="
-  pull_if_missing "$(image_for "$i")"
+  img="$(image_for "$i")"
+  pull_if_missing "$img"
   create_round_container "$i"
+  install_fio "${CONTAINER_PREFIX}${i}" "$img"
 
-  # 传入必要环境变量（与 IO.sh 对齐的 TEST_DIR）
   RESULT_ROOT="$RESULT_ROOT" FILE_SIZE="$FILE_SIZE" RUNTIME="$RUNTIME" TEST_DIR="$TEST_DIR" ./test.sh "$i"
 
-  # 找到此轮 JSON 并追加到 CSV
   WL_JSON=$(ls -1 "${RESULT_ROOT}/c${i}/fio_c${i}_"*.json | tail -n 1 || true)
   if [[ -n "${WL_JSON:-}" && -s "${WL_JSON}" ]]; then
     append_metrics_from_json "$i" "$i" "$WL_JSON"
