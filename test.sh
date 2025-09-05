@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run FIO for a single container (by id 1..6 or full name docker_blktestN)
-# 单轮只针对一个容器：准备 -> 安装fio(若无) -> 生成测试文件 -> 跑fio -> 回拷JSON/LOG
+# Run FIO for a single container (by id 1..6 or full name docker_blktestN).
+# 单轮：准备 -> 安装fio(若无) -> 生成测试文件 -> 跑fio -> 回拷JSON/LOG
 set -euo pipefail
 
 # -------- Config (env可覆盖) ----------
@@ -13,11 +13,6 @@ BS_SEQ="${BS_SEQ:-128k}"
 IODEPTH_SEQ="${IODEPTH_SEQ:-1}"
 BS_RAND="${BS_RAND:-16k}"
 IODEPTH_RAND="${IODEPTH_RAND:-16}"
-# 可自定义镜像源（默认阿里云 https）
-APT_MIRROR="${APT_MIRROR:-https://mirrors.aliyun.com}"
-DEBIAN_MIRROR="${DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}"
-ALPINE_MIRROR_MAIN="${ALPINE_MIRROR_MAIN:-https://mirrors.aliyun.com/alpine/latest-stable/main}"
-ALPINE_MIRROR_COMM="${ALPINE_MIRROR_COMM:-https://mirrors.aliyun.com/alpine/latest-stable/community}"
 # --------------------------------------
 
 die(){ echo "[ERROR] $*" >&2; exit 1; }
@@ -62,76 +57,33 @@ case "$CID" in
   *) die "unsupported container id: $CID (expect 1..6)";;
 esac
 
-# ---- 在容器内安装 fio（自动切换阿里云镜像；已装则跳过） ----
-echo "[INFO] (${CNAME}) ensure fio installed via Aliyun mirrors..."
-docker exec "$CNAME" sh -s <<'EOS' || true
-set -e
-if command -v fio >/dev/null 2>&1; then exit 0; fi
-
-ID=""; CODENAME=""
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-fi
-
-# 优先用 https，顺带强制 IPv4
-if [ -d /etc/apt/apt.conf.d ]; then
-  echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 || true
-fi
-
-case "$ID" in
-  ubuntu)
-    CN="${VERSION_CODENAME:-jammy}"
-    cat >/etc/apt/sources.list <<EOF
-deb ${APT_MIRROR}/ubuntu ${CN} main restricted universe multiverse
-deb ${APT_MIRROR}/ubuntu ${CN}-updates main restricted universe multiverse
-deb ${APT_MIRROR}/ubuntu ${CN}-security main restricted universe multiverse
-deb ${APT_MIRROR}/ubuntu ${CN}-backports main restricted universe multiverse
-EOF
-    apt-get clean
-    apt-get update -o Acquire::Retries=3
-    DEBIAN_FRONTEND=noninteractive apt-get install -y fio
-    ;;
-  debian)
-    CN="${VERSION_CODENAME:-bookworm}"
-    cat >/etc/apt/sources.list <<EOF
-deb ${DEBIAN_MIRROR} ${CN} main contrib non-free non-free-firmware
-deb ${DEBIAN_MIRROR} ${CN}-updates main contrib non-free non-free-firmware
-deb ${DEBIAN_MIRROR}-security ${CN}-security main contrib non-free non-free-firmware
-EOF
-    apt-get clean
-    apt-get update -o Acquire::Retries=3
-    DEBIAN_FRONTEND=noninteractive apt-get install -y fio
-    ;;
-  alpine)
-    printf "%s\n%s\n" "${ALPINE_MIRROR_MAIN}" "${ALPINE_MIRROR_COMM}" > /etc/apk/repositories
-    apk update
-    apk add --no-cache fio
-    ;;
-  rocky|rhel|centos|almalinux|fedora)
-    if command -v dnf >/dev/null 2>&1; then dnf -y install fio || true; fi
-    if command -v yum >/dev/null 2>&1; then yum -y install fio || true; fi
-    ;;
-  opensuse*|sles)
-    zypper --non-interactive ref || true
-    zypper --non-interactive in -y fio || true
-    ;;
-  arch)
-    pacman -Sy --noconfirm fio || true
-    ;;
-  *)
-    # 尝试常见包管工具
-    (apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y fio) \
-    || (apk add --no-cache fio) \
-    || (zypper --non-interactive in -y fio) \
-    || (dnf -y install fio || yum -y install fio || true) \
-    || true
-    ;;
-esac
-EOS
-
-# 二次校验
+# ---- 在容器内安装 fio（不改源，直接用原生包管理器） ----
+echo "[INFO] (${CNAME}) ensure fio installed (no mirror change)..."
 if ! docker exec "$CNAME" sh -lc 'command -v fio >/dev/null 2>&1'; then
-  die "fio not available in container ${CNAME} after mirror switch. Check egress or use an image自带fio。"
+  set +e
+  docker exec "$CNAME" sh -lc '
+    set -e
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+    elif command -v apk >/dev/null 2>&1; then
+      apk add --no-cache fio
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf -y install fio
+    elif command -v yum >/dev/null 2>&1; then
+      yum -y install fio
+    elif command -v zypper >/dev/null 2>&1; then
+      zypper --non-interactive in -y fio
+    elif command -v pacman >/dev/null 2>&1; then
+      pacman -Sy --noconfirm fio
+    else
+      exit 2
+    fi
+  '
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    die "fio not available in ${CNAME} (package install failed)."
+  fi
 fi
 
 echo "[PREP] (${CNAME}) create test file ${FILE_SIZE} at ${TEST_FILE}"
