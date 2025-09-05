@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# 6 轮单容器顺序测试：
-# 每轮 i：
-#   - 只处理第 i 个镜像与容器
-#   - 新建命名卷 /data（干净盘）
-#   - 运行容器 -> 调用 test.sh i
-#   - 解析刚产出的 JSON 追加到 results_all/single_summary.csv
-#   - 删除该容器与卷
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
@@ -14,7 +7,7 @@ DATA_VOL_PREFIX="${DATA_VOL_PREFIX:-blktest_data_c}"
 FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
 
-# 可统一同一镜像： export IMAGE_ALL=ubuntu:22.04
+# 默认一轮拉一个镜像。可统一： export IMAGE_ALL=ubuntu:22.04
 IMAGES=(
   "${IMAGE_ALL:-ubuntu:22.04}"
   "${IMAGE_ALL:-debian:12}"
@@ -23,6 +16,9 @@ IMAGES=(
   "${IMAGE_ALL:-opensuse/leap:15.5}"
   "${IMAGE_ALL:-rockylinux:9}"
 )
+
+# NEW: 默认用宿主网络，避免 bridge 出口受限；如需桥接： export DOCKER_NET=bridge
+DOCKER_NET="${DOCKER_NET:-host}"
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] missing: $1" >&2; exit 1; }; }
 need docker
@@ -40,19 +36,33 @@ pull_if_missing() {
   fi
 }
 
+# NEW: 透传宿主机代理到容器（如果设置了）
+make_proxy_flags() {
+  local -a flags=()
+  for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+    if [ -n "${!v-}" ]; then
+      flags+=("-e" "$v=${!v}")
+    fi
+  done
+  echo "${flags[@]}"
+}
+
 create_round_container() {
   local idx="$1"
   local name="${CONTAINER_PREFIX}${idx}"
   local vol="${DATA_VOL_PREFIX}${idx}"
   local img; img="$(image_for "$idx")"
 
-  # 清理残留
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker volume rm "$vol" >/dev/null 2>&1 || true
-
   docker volume create "$vol" >/dev/null
-  echo "[RUN ] container ${name} (image=${img}, vol=${vol}:/data)"
-  docker run -d --name "$name" -v "$vol:/data" "$img" sh -c 'tail -f /dev/null' >/dev/null
+
+  local proxy_flags; proxy_flags=$(make_proxy_flags)
+  echo "[RUN ] container ${name} (image=${img}, vol=${vol}:/data, net=${DOCKER_NET})"
+  # NEW: --network "${DOCKER_NET}" 并透传代理
+  # shellcheck disable=SC2086
+  docker run -d --name "$name" --network "${DOCKER_NET}" $proxy_flags \
+    -v "$vol:/data" "$img" sh -c 'tail -f /dev/null' >/dev/null
 }
 
 destroy_round_container() {
@@ -91,22 +101,16 @@ def to_float(v):
 
 with open(jpath,'r') as f:
     data=json.load(f)
-jobs=data.get('jobs') or [{}]
-job=jobs[0]
+job=(data.get('jobs') or [{}])[0]
 rd=job.get('read') or {}
 wr=job.get('write') or {}
-
 def bw_bytes(sec):
     if not isinstance(sec,dict): return 0.0
     if 'bw_bytes' in sec: return to_float(sec['bw_bytes'])
     return to_float(sec.get('bw',0))*1024.0
-
 bw=bw_bytes(rd)+bw_bytes(wr)
 iops=to_float(rd.get('iops',0))+to_float(wr.get('iops',0))
-
-# workload from filename: fio_c{cid}_{wl}.json
 wl=os.path.basename(jpath).split('.',1)[0].split('_')[-1]
-
 lat_ms=0.0
 for src in (wr.get('clat_ns'), wr.get('lat_ns'), job.get('clat_ns'), job.get('lat_ns')):
     if src is not None:
@@ -114,15 +118,13 @@ for src in (wr.get('clat_ns'), wr.get('lat_ns'), job.get('clat_ns'), job.get('la
             lat_ms=to_float(src['mean'])/1e6; break
         if isinstance(src,(int,float,str)):
             lat_ms=to_float(src)/1e6; break
-
 ts=datetime.datetime.now().isoformat(timespec='seconds')
-row=f"{round_},{cid},{wl},{bw/(1024*1024):.3f},{iops:.3f},{lat_ms:.3f},{jpath},{ts}\n"
-with open(csv,'a') as f: f.write(row)
-print(row.strip())
+with open(csv,'a') as f:
+    f.write(f"{round_},{cid},{wl},{bw/(1024*1024):.3f},{iops:.3f},{lat_ms:.3f},{jpath},{ts}\n")
 PY
 }
 
-# ---------- 主流程 ----------
+# ---------- main ----------
 ensure_csv_header
 
 for i in $(seq 1 6); do
@@ -131,10 +133,8 @@ for i in $(seq 1 6); do
   pull_if_missing "$img"
   create_round_container "$i"
 
-  export RESULT_ROOT FILE_SIZE RUNTIME
-  ./test.sh "$i"
+  RESULT_ROOT="$RESULT_ROOT" FILE_SIZE="$FILE_SIZE" RUNTIME="$RUNTIME" ./test.sh "$i"
 
-  # 找到此轮JSON（只有一个）
   WL_JSON=$(ls -1 "${RESULT_ROOT}/c${i}/fio_c${i}_"*.json | tail -n 1 || true)
   if [[ -n "${WL_JSON:-}" && -s "${WL_JSON}" ]]; then
     append_metrics_from_json "$i" "$i" "$WL_JSON"
