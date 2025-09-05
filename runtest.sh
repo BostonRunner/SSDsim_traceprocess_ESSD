@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
+# 6 轮单容器顺序测试（与 IO.sh 同步的镜像与安装逻辑）：
+#   每轮 i：只拉对应镜像 -> docker run -dit (bash||sh) -> 按镜像类型 update 再 install fio
+#           -> ./test.sh i 产出 JSON/LOG -> 解析 JSON 追加 CSV -> 删除容器（干净盘）
 set -euo pipefail
 
 RESULT_ROOT="${RESULT_ROOT:-./results_all}"
 CONTAINER_PREFIX="${CONTAINER_PREFIX:-docker_blktest}"
-DATA_VOL_PREFIX="${DATA_VOL_PREFIX:-blktest_data_c}"
 FILE_SIZE="${FILE_SIZE:-1G}"
 RUNTIME="${RUNTIME:-30}"
+TEST_DIR="${TEST_DIR:-/mnt/testdir}"
 
-# 默认一轮拉一个镜像。可统一： export IMAGE_ALL=ubuntu:22.04
+# 与 IO.sh 相同的镜像顺序
 IMAGES=(
-  "${IMAGE_ALL:-ubuntu:22.04}"
-  "${IMAGE_ALL:-debian:12}"
-  "${IMAGE_ALL:-alpine:3.19}"
-  "${IMAGE_ALL:-archlinux:latest}"
-  "${IMAGE_ALL:-opensuse/leap:15.5}"
-  "${IMAGE_ALL:-rockylinux:9}"
+  "ubuntu:22.04"
+  "opensuse/leap:15.5"
+  "parrotsec/security"
+  "debian:11"
+  "alpine:3.18"
+  "archlinux:latest"
 )
-
-# NEW: 默认用宿主网络，避免 bridge 出口受限；如需桥接： export DOCKER_NET=bridge
-DOCKER_NET="${DOCKER_NET:-host}"
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] missing: $1" >&2; exit 1; }; }
 need docker
@@ -29,49 +29,59 @@ image_for(){ local idx="$1"; echo "${IMAGES[$((idx-1))]}"; }
 pull_if_missing() {
   local img="$1"
   if ! docker image inspect "$img" >/dev/null 2>&1; then
-    echo "[PULL] $img"
-    docker pull "$img" >/dev/null
+    echo "[PULL] $img"; docker pull "$img" >/dev/null
   else
     echo "[HAVE] $img"
   fi
 }
 
-# NEW: 透传宿主机代理到容器（如果设置了）
-make_proxy_flags() {
-  local -a flags=()
-  for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
-    if [ -n "${!v-}" ]; then
-      flags+=("-e" "$v=${!v}")
-    fi
-  done
-  echo "${flags[@]}"
+install_fio() {
+  local cname="$1"; local image="$2"
+  echo "[INSTALL] 在 ${cname} (${image}) 安装 fio（update -> install）..."
+  case "$image" in
+    ubuntu*|debian*|parrotsec*)
+      docker exec "$cname" bash -lc "apt-get update -o Acquire::Retries=3 && DEBIAN_FRONTEND=noninteractive apt-get install -y fio" ;;
+    alpine*)
+      docker exec "$cname" sh   -lc "apk update && apk add --no-cache fio" ;;
+    archlinux*)
+      docker exec "$cname" bash -lc "pacman -Sy --noconfirm fio" ;;
+    opensuse*|opensuse/*|*leap*)
+      docker exec "$cname" bash -lc "zypper --non-interactive refresh && zypper --non-interactive install -y fio" ;;
+    *)  # 兜底再尝试一遍
+      docker exec "$cname" sh -lc "command -v apt-get >/dev/null && (apt-get update && apt-get install -y fio) || true"
+      docker exec "$cname" sh -lc "command -v apk     >/dev/null && (apk update && apk add --no-cache fio) || true"
+      docker exec "$cname" sh -lc "command -v pacman  >/dev/null && (pacman -Sy --noconfirm fio) || true"
+      docker exec "$cname" sh -lc "command -v zypper  >/dev/null && (zypper --non-interactive refresh && zypper --non-interactive install -y fio) || true"
+      ;;
+  esac
+  docker exec "$cname" sh -lc 'command -v fio >/dev/null 2>&1' || { echo "[ERROR] fio install failed in $cname"; exit 2; }
 }
 
 create_round_container() {
   local idx="$1"
   local name="${CONTAINER_PREFIX}${idx}"
-  local vol="${DATA_VOL_PREFIX}${idx}"
   local img; img="$(image_for "$idx")"
 
+  # 清理残留
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker volume rm "$vol" >/dev/null 2>&1 || true
-  docker volume create "$vol" >/dev/null
 
-  local proxy_flags; proxy_flags=$(make_proxy_flags)
-  echo "[RUN ] container ${name} (image=${img}, vol=${vol}:/data, net=${DOCKER_NET})"
-  # NEW: --network "${DOCKER_NET}" 并透传代理
-  # shellcheck disable=SC2086
-  docker run -d --name "$name" --network "${DOCKER_NET}" $proxy_flags \
-    -v "$vol:/data" "$img" sh -c 'tail -f /dev/null' >/dev/null
+  echo "[RUN ] 启动 ${name} ($img) ..."
+  if docker run -dit --name "$name" "$img" bash >/dev/null 2>&1; then
+    echo "[INFO] $name started with bash"
+  else
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -dit --name "$name" "$img" sh >/dev/null
+    echo "[INFO] $name started with sh (fallback)"
+  fi
+
+  install_fio "$name" "$img"
+  docker exec "$name" sh -lc "mkdir -p '${TEST_DIR}'"
 }
 
 destroy_round_container() {
-  local idx="$1"
-  local name="${CONTAINER_PREFIX}${idx}"
-  local vol="${DATA_VOL_PREFIX}${idx}"
-  echo "[CLEAN] remove ${name} and volume ${vol}"
+  local idx="$1"; local name="${CONTAINER_PREFIX}${idx}"
+  echo "[CLEAN] 删除容器 ${name}（不留卷，下一轮干净盘）"
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker volume rm "$vol" >/dev/null 2>&1 || true
 }
 
 ensure_csv_header() {
@@ -87,7 +97,6 @@ append_metrics_from_json() {
   python3 - "$round" "$cid" "$json_path" "$csv" <<'PY'
 import json,sys,os,datetime
 round_,cid,jpath,csv=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
-
 def to_float(v):
     if isinstance(v,(int,float)): return float(v)
     if isinstance(v,str):
@@ -96,14 +105,11 @@ def to_float(v):
     if isinstance(v,dict):
         for k in ("mean","value","avg"):
             if k in v: return to_float(v[k])
-        return 0.0
     return 0.0
-
 with open(jpath,'r') as f:
     data=json.load(f)
 job=(data.get('jobs') or [{}])[0]
-rd=job.get('read') or {}
-wr=job.get('write') or {}
+rd=job.get('read') or {}; wr=job.get('write') or {}
 def bw_bytes(sec):
     if not isinstance(sec,dict): return 0.0
     if 'bw_bytes' in sec: return to_float(sec['bw_bytes'])
@@ -124,17 +130,17 @@ with open(csv,'a') as f:
 PY
 }
 
-# ---------- main ----------
+# ---------- 主流程：6 轮 ----------
 ensure_csv_header
-
 for i in $(seq 1 6); do
   echo "========== ROUND ${i}/6 =========="
-  img="$(image_for "$i")"
-  pull_if_missing "$img"
+  pull_if_missing "$(image_for "$i")"
   create_round_container "$i"
 
-  RESULT_ROOT="$RESULT_ROOT" FILE_SIZE="$FILE_SIZE" RUNTIME="$RUNTIME" ./test.sh "$i"
+  # 传入必要环境变量（与 IO.sh 对齐的 TEST_DIR）
+  RESULT_ROOT="$RESULT_ROOT" FILE_SIZE="$FILE_SIZE" RUNTIME="$RUNTIME" TEST_DIR="$TEST_DIR" ./test.sh "$i"
 
+  # 找到此轮 JSON 并追加到 CSV
   WL_JSON=$(ls -1 "${RESULT_ROOT}/c${i}/fio_c${i}_"*.json | tail -n 1 || true)
   if [[ -n "${WL_JSON:-}" && -s "${WL_JSON}" ]]; then
     append_metrics_from_json "$i" "$i" "$WL_JSON"
