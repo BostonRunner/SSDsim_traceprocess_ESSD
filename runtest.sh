@@ -46,7 +46,7 @@ create_round_container() {
   local vol="${DATA_VOL_PREFIX}${idx}"
   local img; img="$(image_for "$idx")"
 
-  # 确保上一轮残留清理掉
+  # 清理残留
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker volume rm "$vol" >/dev/null 2>&1 || true
 
