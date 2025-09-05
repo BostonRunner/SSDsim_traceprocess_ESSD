@@ -63,18 +63,17 @@ install_fio() {
 
   case "$image" in
     ubuntu:22.04|ubuntu:22.04@*|ubuntu:jammy*|ubuntu:22.*)
-      # 先尝试官方源（不改源）
+      # 1) 先尝试官方源（不改源；不写任何 apt 配置文件）
       set +e
       docker exec "$cname" bash -lc '
         set -e
-        # 避免 IPv6 黑洞
-        echo Acquire::ForceIPv4 \"true\" >/etc/apt/apt.conf.d/99force-ipv4 || true
-        apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
-        DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+        apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
+        DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true install -y fio
       '
       rc=$?
       set -e
       if [[ $rc -ne 0 ]]; then
+        # 2) 仅 Ubuntu 失败时：回退到阿里云源再 update+install（仍然用 ForceIPv4 参数）
         echo "[FALLBACK] Ubuntu 官方源不可达，切换到阿里云源：${UBUNTU_MIRROR_URL}"
         docker exec "$cname" bash -lc "
           set -e
@@ -86,8 +85,8 @@ deb ${UBUNTU_MIRROR_URL} \${CN}-backports main restricted universe multiverse
 deb ${UBUNTU_MIRROR_URL} \${CN}-security main restricted universe multiverse
 EOF
           apt-get clean
-          apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20
-          DEBIAN_FRONTEND=noninteractive apt-get install -y fio
+          apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::ForceIPv4=true install -y fio
         "
       fi
       ;;
