@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victim
+  namespace: fio-lab
+spec:
+  serviceName: "victim"
+  replicas: 3
+  selector:
+    matchLabels: { app: victim }
+  template:
+    metadata:
+      labels: { app: victim }
+    spec:
+      terminationGracePeriodSeconds: 10
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector: { matchLabels: { app: victim } }
+      containers:
+      - name: fio
+        image: xridge/fio:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: RUNTIME, value: "120"}
+        - {name: IO_SIZE, value: "8g"}
+        - {name: FILE_SIZE, value: "10g"}
+        - {name: BS, value: "4k"}
+        - {name: IODEPTH, value: "16"}
+        - {name: RWMIXREAD, value: "70"}
+        command: ["sh","-c"]
+        args:
+          - |
+            set -e
+            fio --name=hotrw --filename=/data/testfile --size=${FILE_SIZE} --io_size=${IO_SIZE}                 --time_based --runtime=${RUNTIME} --ioengine=libaio --direct=1                 --rw=randrw --rwmixread=${RWMIXREAD} --bs=${BS} --iodepth=${IODEPTH}                 --group_reporting --output=/results/fio.json --output-format=json
+            touch /results/DONE
+            sleep infinity
+        volumeMounts:
+        - { name: data, mountPath: /data }
+        - { name: results, mountPath: /results }
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+      volumes:
+      - name: results
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata: { name: data, labels: { app: victim } }
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: ceph-rbd-lab-s1
+      resources: { requests: { storage: 10Gi } }
